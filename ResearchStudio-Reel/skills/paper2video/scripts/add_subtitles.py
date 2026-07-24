@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 add_subtitles.py — generate subtitles from per-slide narration notes and
-either burn them into the video pixels (hardsub, default) or mux them as a
-soft mov_text track (`--soft`).
+either burn them into the video pixels (hardsub, default), mux them as a
+soft mov_text track (`--soft`), or keep the public video caption-free while
+still writing timing sidecars (`--no-subtitles`).
 
 Pipeline position (optional post-step for paper2video):
     Inputs:
@@ -40,6 +41,9 @@ Pipeline position (optional post-step for paper2video):
         9. `--soft` mode: skip burn-in, stream-copy video+audio, and mux the
            SRT as a `mov_text` track. Toggleable in players that honor it,
            invisible on players that don't. Output filename unchanged.
+       10. `--no-subtitles` mode: still write SRT/VTT for timeline and QA,
+           but stream-copy only the input video/audio streams to the output.
+           Existing subtitle/data streams are explicitly excluded.
 
 Why hardsub by default (this turn's contract — "make the script part of the
 video file"):
@@ -624,13 +628,15 @@ def write_ass(cues: list[Cue], path: Path, *,
               video_w: int, video_h: int,
               font_name: str, font_size: int,
               outline_width: float, shadow_depth: float,
-              subtitle_box: bool, box_opacity: float,
+              subtitle_box: bool, subtitle_bar: bool,
+              subtitle_bar_height: int, box_opacity: float,
               box_padding: float) -> None:
     """Emit an ASS subtitle file with per-event color overrides.
 
     The style block sets sensible defaults (font, size, outline/background).
     By default paper2video uses a translucent dark box so burned-in subtitles
-    do not visually merge with PPT text. Legacy no-box mode keeps the
+    do not visually merge with PPT text. Bottom-bar mode reserves a solid black
+    band below a proportionally scaled slide; legacy no-box mode keeps the
     per-event outline fallback for users who explicitly want plain captions.
 
     PlayResX/PlayResY MUST match the output frame size or libass renders
@@ -639,13 +645,22 @@ def write_ass(cues: list[Cue], path: Path, *,
     """
     box_alpha = _opacity_to_ass_alpha(box_opacity)
     box_color = _hex_to_ass_color("#101820", alpha=box_alpha)
-    if subtitle_box:
+    if subtitle_bar:
+        border_style = 1
+        style_outline = 0.0
+        style_shadow = 0.0
+        style_primary = _hex_to_ass_color(COLOR_WHITE)
+        style_outline_color = _hex_to_ass_color(COLOR_BLACK)
+        style_back_color = _hex_to_ass_color(COLOR_BLACK)
+        margin_v = max(20, int(round(subtitle_bar_height * 0.34)))
+    elif subtitle_box:
         border_style = 3
         style_outline = max(0.0, float(box_padding))
         style_shadow = 0.0
         style_primary = _hex_to_ass_color(COLOR_WHITE)
         style_outline_color = box_color
         style_back_color = box_color
+        margin_v = 60
     else:
         border_style = 1
         style_outline = outline_width
@@ -653,6 +668,7 @@ def write_ass(cues: list[Cue], path: Path, *,
         style_primary = _hex_to_ass_color(COLOR_WHITE)
         style_outline_color = _hex_to_ass_color(COLOR_BLACK)
         style_back_color = _hex_to_ass_color(COLOR_BLACK, alpha=128)
+        margin_v = 60
 
     header = (
         "[Script Info]\n"
@@ -667,11 +683,12 @@ def write_ass(cues: list[Cue], path: Path, *,
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # Bold=0; Alignment=2 = bottom-center; MarginV=60 lifts the cue off
-        # the very bottom edge so it doesn't collide with a player chrome.
+        # Bold=0; Alignment=2 = bottom-center. Bottom-bar mode centers captions
+        # within its reserved band; overlay modes retain the historical 60px
+        # bottom margin so they do not collide with player chrome.
         f"Style: Default,{font_name},{font_size},{style_primary},&H000000FF&,"
         f"{style_outline_color},{style_back_color},0,0,0,0,100,100,0,0,"
-        f"{border_style},{style_outline},{style_shadow},2,40,40,60,1\n"
+        f"{border_style},{style_outline},{style_shadow},2,40,40,{margin_v},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
@@ -680,10 +697,10 @@ def write_ass(cues: list[Cue], path: Path, *,
 
     body_lines: list[str] = []
     for c in cues:
-        if subtitle_box:
-            # Box mode intentionally keeps the cue text white. The box is the
-            # contrast mechanism; using auto-picked black text on a dark box
-            # would make the final burned-in captions hard to read.
+        if subtitle_box or subtitle_bar:
+            # Dark-box and black-bar modes intentionally keep cue text white.
+            # Their background is the contrast mechanism; using auto-picked
+            # black text would make the final captions hard to read.
             override = f"{{\\c{_hex_to_ass_color(COLOR_WHITE)}}}"
         else:
             primary = _hex_to_ass_color(c.color)
@@ -720,16 +737,43 @@ def probe_video_dimensions(mp4: Path, ffmpeg: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
+def subtitle_bar_geometry(
+    video_w: int, video_h: int, bar_height: int,
+) -> tuple[int, int, int, int]:
+    """Return an even, aspect-preserving slide frame above a bottom bar.
+
+    The final frame keeps the input resolution. The full slide is scaled
+    proportionally into the space above the bar, centered horizontally, and
+    never cropped or covered by captions.
+    """
+
+    if video_w < 2 or video_h < 2:
+        raise ValueError("video dimensions must be positive")
+    if bar_height <= 0 or bar_height >= video_h:
+        raise ValueError("subtitle bar height must fit inside the video frame")
+    content_h = max(2, video_h - bar_height)
+    content_h -= content_h % 2
+    content_w = max(2, int(video_w * (content_h / video_h)))
+    content_w -= content_w % 2
+    content_w = min(video_w - (video_w % 2), content_w)
+    x = max(0, (video_w - content_w) // 2)
+    return content_w, content_h, x, video_h - content_h
+
+
 def burn_subtitles(mp4: Path, ass: Path, out: Path, ffmpeg: str, *,
-                   crf: int, preset: str) -> None:
+                   crf: int, preset: str,
+                   video_w: int, video_h: int,
+                   subtitle_bar_height: int = 0) -> None:
     """Re-encode the video with the ASS file rendered onto every frame.
 
     The `ass=` filter needs an OS path; on Linux/macOS we pass it verbatim,
     on Windows ffmpeg requires backslash-escaped drive letters (`C\\:`). We
     use the resolved absolute path so the filter doesn't depend on CWD.
 
-    Audio is stream-copied — there's no reason to re-encode the AAC track
-    a second time and it would only add drift.
+    Bottom-bar mode first scales the complete slide proportionally into the
+    upper region and pads the remaining frame black. Audio is stream-copied —
+    there's no reason to re-encode the AAC track a second time and it would
+    only add drift.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     ass_abs = str(ass.resolve())
@@ -737,11 +781,20 @@ def burn_subtitles(mp4: Path, ass: Path, out: Path, ffmpeg: str, *,
     # Forward slashes are safe on Linux/macOS; on Windows we'd need extra
     # escaping. Our pipeline doesn't target Windows for rendering, so the
     # POSIX path passes through cleanly.
-    ass_filter = f"ass={ass_abs}"
+    filters: list[str] = []
+    if subtitle_bar_height:
+        content_w, content_h, x, _ = subtitle_bar_geometry(
+            video_w, video_h, subtitle_bar_height,
+        )
+        filters.extend([
+            f"scale={content_w}:{content_h}:flags=lanczos",
+            f"pad={video_w}:{video_h}:{x}:0:color=black",
+        ])
+    filters.append(f"ass={ass_abs}")
     cmd = [
         ffmpeg, "-y",
         "-i", str(mp4),
-        "-vf", ass_filter,
+        "-vf", ",".join(filters),
         "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",
@@ -751,6 +804,38 @@ def burn_subtitles(mp4: Path, ass: Path, out: Path, ffmpeg: str, *,
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         sys.exit(f"[add_subtitles] ffmpeg burn-in failed:\n{proc.stderr}")
+
+
+def copy_without_subtitles(mp4: Path, out: Path, ffmpeg: str) -> None:
+    """Stream-copy the primary video/audio streams and exclude captions.
+
+    The source is normally render_video.py's raw MP4. Explicit stream maps and
+    ``-sn`` keep this delivery correct even if a retried job accidentally
+    supplies an MP4 that already contains a soft subtitle track.
+    """
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    same_path = mp4.resolve() == out.resolve()
+    target = (
+        out.with_name(f".{out.stem}.no-subtitles.tmp{out.suffix}")
+        if same_path
+        else out
+    )
+    cmd = [
+        ffmpeg, "-y",
+        "-i", str(mp4),
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c", "copy",
+        "-sn", "-dn",
+        str(target),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        target.unlink(missing_ok=True)
+        sys.exit(f"[add_subtitles] ffmpeg no-subtitles copy failed:\n{proc.stderr}")
+    if same_path:
+        target.replace(out)
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +1009,9 @@ def main() -> int:
                     help="Soft-mux as mov_text instead of burning into pixels. "
                          "Use this if you want a toggleable caption track and don't "
                          "mind that some players (mobile previews, embeds) ignore it.")
+    ap.add_argument("--no-subtitles", action="store_true",
+                    help="Keep the output MP4 caption-free while still writing SRT/VTT "
+                         "for the internal timeline and QA. Video/audio are stream-copied.")
     ap.add_argument("--font", default="DejaVu Sans",
                     help="Font for burned-in subtitles (default: DejaVu Sans — present "
                          "on most Linux installs; pick a system font you actually have).")
@@ -937,6 +1025,13 @@ def main() -> int:
                     help="Burn subtitles with a translucent dark background box (default).")
     ap.add_argument("--no-subtitle-box", dest="subtitle_box", action="store_false",
                     help="Legacy mode: burn plain text with outline/shadow and no background box.")
+    ap.add_argument("--subtitle-bar", action="store_true",
+                    help="Burn white captions into a solid black bottom band. The complete "
+                         "slide is scaled proportionally above the band so PPT content is "
+                         "never covered or cropped.")
+    ap.add_argument("--subtitle-bar-height", type=float, default=0.16,
+                    help="Bottom band height as a fraction of the output frame, 0.10..0.30 "
+                         "(default: 0.16). Used only with --subtitle-bar.")
     ap.add_argument("--subtitle-box-opacity", type=float, default=0.62,
                     help="Opacity for the subtitle background box, 0..1 (default: 0.62).")
     ap.add_argument("--subtitle-box-padding", type=float, default=10.0,
@@ -949,6 +1044,13 @@ def main() -> int:
     ap.add_argument("--srt-only", action="store_true",
                     help="Write the .srt and exit (skip muxing/burning).")
     args = ap.parse_args()
+    delivery_modes = sum(bool(value) for value in (
+        args.soft, args.subtitle_bar, args.no_subtitles,
+    ))
+    if delivery_modes > 1:
+        ap.error("--soft, --subtitle-bar, and --no-subtitles are mutually exclusive")
+    if not 0.10 <= args.subtitle_bar_height <= 0.30:
+        ap.error("--subtitle-bar-height must be between 0.10 and 0.30")
 
     project_path = Path(args.project_path).resolve()
     if not project_path.is_dir():
@@ -1005,7 +1107,11 @@ def main() -> int:
 
     # Per-slide color decision. `--color white|black` forces a single color
     # across the whole deck and skips the probe pass entirely.
-    forced = {"white": COLOR_WHITE, "black": COLOR_BLACK, "auto": None}[args.color]
+    forced = (
+        COLOR_WHITE
+        if args.subtitle_bar
+        else {"white": COLOR_WHITE, "black": COLOR_BLACK, "auto": None}[args.color]
+    )
     midpoints = [m for _, _, m in pending]
     colors = pick_slide_colors(mp4_path, midpoints, ffmpeg, default=forced)
 
@@ -1035,6 +1141,12 @@ def main() -> int:
     out_path = (Path(args.out).resolve() if args.out
                 else exports_dir / f"{mp4_path.stem}_subbed.mp4")
 
+    if args.no_subtitles:
+        copy_without_subtitles(mp4_path, out_path, ffmpeg)
+        print(f"[add_subtitles] copied video/audio without subtitle streams to {out_path}")
+        print("[add_subtitles] SRT/VTT remain available for timeline and QA.")
+        return 0
+
     if args.soft:
         # Soft mov_text track — stream-copy video+audio, no re-encode.
         mux_subtitles(mp4_path, srt_path, out_path,
@@ -1047,20 +1159,31 @@ def main() -> int:
     # user means by "part of the video file" — there is no toggle, every
     # player on every device shows the captions because they are pixels now.
     video_w, video_h = probe_video_dimensions(mp4_path, ffmpeg)
+    subtitle_bar_height = (
+        max(2, int(round(video_h * args.subtitle_bar_height)))
+        if args.subtitle_bar
+        else 0
+    )
     ass_path = exports_dir / f"{mp4_path.stem}.ass"
     write_ass(
         all_cues, ass_path,
         video_w=video_w, video_h=video_h,
         font_name=args.font, font_size=args.font_size,
         outline_width=args.outline_width, shadow_depth=args.shadow_depth,
-        subtitle_box=args.subtitle_box,
+        subtitle_box=args.subtitle_box and not args.subtitle_bar,
+        subtitle_bar=args.subtitle_bar,
+        subtitle_bar_height=subtitle_bar_height,
         box_opacity=args.subtitle_box_opacity,
         box_padding=args.subtitle_box_padding,
     )
     print(f"[add_subtitles] wrote ASS at {video_w}×{video_h} → {ass_path}")
     print(f"[add_subtitles] burning subtitles into pixels (libx264 crf={args.crf} preset={args.preset})…")
-    burn_subtitles(mp4_path, ass_path, out_path, ffmpeg,
-                   crf=args.crf, preset=args.preset)
+    burn_subtitles(
+        mp4_path, ass_path, out_path, ffmpeg,
+        crf=args.crf, preset=args.preset,
+        video_w=video_w, video_h=video_h,
+        subtitle_bar_height=subtitle_bar_height,
+    )
     print(f"[add_subtitles] burned subtitles into {out_path}")
     print(f"[add_subtitles] captions are part of every frame — no player toggle required.")
     return 0

@@ -58,12 +58,12 @@ The final package is not complete until `video.mp4`, `video_no_subtitles.mp4`, `
 3. **Delegate deck generation to ppt-master** — the skill must run the full ppt-master workflow, not a hand-written shortcut deck.
 4. **Generate audio** with the shared `paper2poster/scripts/generate_audio.py` synthesizer, preserving one MP3 per script section.
 5. **Build visual cue contracts** so important slide regions are anchored to narration chunks.
-6. **Render and subtitle** with `render_video.py` and `add_subtitles.py`, producing both the subtitled and no-subtitle MP4s.
+6. **Render and subtitle** with `render_video.py` and `add_subtitles.py`; the public MP4 may use burned, soft, bottom-bar, or disabled captions while the raw compatibility render remains available to downstream Paper2Reel.
 7. **Build timeline metadata** so `paper2reel` can map poster sections, slide thumbnails, subtitles, and video seek times.
 
 ## Visual attention cues
 
-The production highlight style is `spotlight_laser`: a feathered spotlight over the accepted slide region plus a small red laser-pointer dot at the cue center. The renderer also keeps older styles (`box`, `cursor`, `box_cursor`, `spotlight`, `spotlight_cursor`, `laser`) for comparison and repair work.
+The production highlight style is `spotlight_laser`: a feathered spotlight over the accepted slide region plus a small red laser-pointer dot at the cue center. The renderer also supports the independent pointer/region combinations `box`, `cursor`, `box_cursor`, `spotlight`, `spotlight_cursor`, `laser`, and `box_laser` for comparison and repair work.
 
 Visual cues are generated from the deck, the script, word-boundary timings, and anchor metadata. Strict QA rejects malformed boxes, weak timing alignment, or low-confidence geometry when final attention cues are required.
 

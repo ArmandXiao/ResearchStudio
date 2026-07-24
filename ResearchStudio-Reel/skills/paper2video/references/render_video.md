@@ -171,6 +171,7 @@ The current renderer supports:
 | `spotlight` | Feathered dim-out around the selected box |
 | `spotlight_cursor` | Feathered dim-out plus mouse pointer |
 | `laser` | Red laser-pointer dot only at the cue point |
+| `box_laser` | Focus box plus red laser-pointer dot |
 | `spotlight_laser` | Default. Feathered dim-out plus red laser-pointer dot |
 
 The default `spotlight_laser` style is the production path because it combines

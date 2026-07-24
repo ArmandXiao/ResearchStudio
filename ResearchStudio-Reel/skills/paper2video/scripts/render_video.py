@@ -91,10 +91,11 @@ VALID_HIGHLIGHT_STYLES = {
     "box_cursor",
     "spotlight_cursor",
     "laser",
+    "box_laser",
     "spotlight_laser",
 }
 CURSOR_STYLES = {"cursor", "box_cursor", "spotlight_cursor"}
-LASER_STYLES = {"laser", "spotlight_laser"}
+LASER_STYLES = {"laser", "box_laser", "spotlight_laser"}
 SPOTLIGHT_STYLES = {"spotlight", "spotlight_cursor", "spotlight_laser"}
 
 
@@ -1455,7 +1456,7 @@ def _attention_filters(
             pad = max(1, int(round(thickness * HIGHLIGHT_BOX_EXPAND_MULTIPLIER)))
             style = cue.style if cue.style in VALID_HIGHLIGHT_STYLES else "box"
             x, y, w, h = _box_pixels(cue.box, width=width, height=height, pad=pad)
-            if style in {"box", "box_cursor"}:
+            if style in {"box", "box_cursor", "box_laser"}:
                 filters.extend(
                     _box_draw_filters(
                         x=x, y=y, w=w, h=h,
@@ -1902,7 +1903,7 @@ def main() -> int:
                          "for positioned highlights/cursors.")
     ap.add_argument("--highlight-style", choices=tuple(sorted(VALID_HIGHLIGHT_STYLES)), default="spotlight_laser",
                     help="How highlight cues should render: box, spotlight, cursor, box+cursor, "
-                         "spotlight+cursor, laser dot, or spotlight+laser.")
+                         "spotlight+cursor, laser dot, box+laser, or spotlight+laser.")
     ap.add_argument("--visual-cues", default=None,
                     help="JSON file describing per-slide highlight/cursor cues in normalized coordinates.")
     ap.add_argument("--allow-missing-visual-cues", action="store_true",

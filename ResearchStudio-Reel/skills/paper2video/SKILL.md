@@ -376,7 +376,11 @@ python skills/paper2video/scripts/add_subtitles.py "$VIDEO_OUT" \
 
 The default burned-in subtitle render uses a translucent dark caption box so
 narration text stays separate from dense PPT content. Use `--no-subtitle-box`
-only for an explicitly approved legacy/plain-caption render.
+only for an explicitly approved legacy/plain-caption render. Use
+`--subtitle-bar` to scale the complete slide above a solid black caption band
+when captions must not overlap any PPT content.
+Use `--no-subtitles` when the user disables captions. It still writes SRT/VTT
+for timeline and QA, but stream-copies only video/audio into `video.mp4`.
 
 cp "$VIDEO_CLIPS/video_raw.mp4" "$VIDEO_OUT/video_no_subtitles.mp4"
 cp <deck.pptx> "$VIDEO_SLIDES/slides.pptx"
@@ -488,7 +492,11 @@ python skills/paper2video/scripts/add_subtitles.py <project_path> \
 
 The default burned-in subtitle render uses a translucent dark caption box so
 narration text stays separate from dense PPT content. Use `--no-subtitle-box`
-only for an explicitly approved legacy/plain-caption render.
+only for an explicitly approved legacy/plain-caption render. Use
+`--subtitle-bar` to scale the complete slide above a solid black caption band
+when captions must not overlap any PPT content.
+Use `--no-subtitles` when the user disables captions. It still writes SRT/VTT
+for timeline and QA, but stream-copies only video/audio into `video.mp4`.
 
 cp "$VIDEO_CLIPS/video_raw.mp4" "$VIDEO_OUT/video_no_subtitles.mp4"
 cp <project_path>/exports/<name>.pptx "$VIDEO_SLIDES/slides.pptx"
@@ -664,7 +672,7 @@ Useful flags:
 | `--start-pad SECONDS` | Leading silence before slide 1 (default 0.5) |
 | `--target-minutes N` | Write a final duration report against an N-minute target |
 | `--attention-mode none|highlight|cursor|both` | Burn positioned attention cues into slide segments (default `highlight`) |
-| `--highlight-style box|spotlight|cursor|box_cursor|spotlight_cursor|laser|spotlight_laser` | Presentation style for highlight cues; default `spotlight_laser` |
+| `--highlight-style box|spotlight|cursor|box_cursor|spotlight_cursor|laser|box_laser|spotlight_laser` | Presentation style for highlight cues; default `spotlight_laser` |
 | `--visual-cues path.json` | Normalized per-slide highlight/cursor cue file |
 | `--allow-missing-visual-cues` | Degraded/debug only; final output should not use it |
 | `--frames-only` | Stop after slide-frame export |
@@ -926,7 +934,11 @@ the viewer can show duplicate subtitles when CC is enabled.
 Default mode burns subtitles into the video pixels with a translucent dark
 caption box. Pass `--soft` to mux a toggleable `mov_text` track instead. Pass
 `--srt-only` to produce just the SRT. Pass `--no-subtitle-box` only for a
-user-approved legacy/plain-caption render.
+user-approved legacy/plain-caption render. Pass `--subtitle-bar` to preserve
+the complete slide above a solid black bottom band and burn white captions
+inside that reserved band; this avoids covering dense PPT content.
+Pass `--no-subtitles` to keep the public MP4 caption-free while still writing
+the SRT/VTT timing sidecars required by the internal timeline and QA.
 
 ## Sanity Checks
 

@@ -52,11 +52,20 @@ The skills run on [Claude Code](https://docs.claude.com/en/docs/claude-code/over
 
 ## Quick Start
 
-We recommend creating an isolated environment first:
+We recommend creating an isolated environment first, using either conda or uv:
+
+**Option 1 — conda:**
 
 ```bash
 conda create -n researchstudio "python>=3.10" -y
 conda activate researchstudio
+```
+
+**Option 2 — uv:**
+
+```bash
+uv venv --python 3.10
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
 ```
 
 Then pick one of the two install paths below:

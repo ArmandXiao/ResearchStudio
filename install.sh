@@ -172,15 +172,32 @@ if [ -z "$PY" ]; then
   esac
   exit 1
 fi
-echo "  python:       $("$PY" --version 2>&1) — $("$PY" -c 'import sys; print(sys.executable)')"
+PY_EXE="$("$PY" -c 'import sys; print(sys.executable)')"
+echo "  python:       $("$PY" --version 2>&1) — $PY_EXE"
+
+# A default `uv venv` intentionally has no pip module. Prefer pip when the
+# selected interpreter provides it (including conda), otherwise let uv install
+# directly into that interpreter's environment.
+if "$PY" -m pip --version >/dev/null 2>&1; then
+  PY_PACKAGE_MANAGER=pip
+elif command -v uv >/dev/null 2>&1; then
+  PY_PACKAGE_MANAGER=uv
+else
+  die "Neither pip for $PY_EXE nor uv was found. Install pip or uv, then re-run."
+fi
+echo "  python deps:  $PY_PACKAGE_MANAGER"
 echo
 
 # ---------------------------------------------------------------------------
 # helpers used by both bundles
 # ---------------------------------------------------------------------------
 
-# pip_install <pkg> [<pkg> …]  — try plain install, then --user --break-system-packages, then --user.
+# pip_install <pkg> [<pkg> …] — install into the selected conda/venv/uv environment.
 pip_install() {
+  if [ "$PY_PACKAGE_MANAGER" = uv ]; then
+    uv pip install --python "$PY_EXE" --upgrade "$@"
+    return
+  fi
   if "$PY" -m pip install --upgrade "$@"; then return 0; fi
   if "$PY" -m pip install --user --break-system-packages --upgrade "$@"; then
     echo "  (used --user --break-system-packages for an externally-managed environment)"
@@ -368,7 +385,9 @@ if [ "$USE_REEL" = 1 ]; then
     "imageio-ffmpeg"
     "edge-tts>=7.2.8"
   )
-  "$PY" -m pip install --upgrade pip || true
+  if [ "$PY_PACKAGE_MANAGER" = pip ]; then
+    "$PY" -m pip install --upgrade pip || true
+  fi
   pip_install "${REEL_PIP[@]}"
 
   log "Playwright Chromium (used by Paper2Poster HTML → PDF/PNG)"

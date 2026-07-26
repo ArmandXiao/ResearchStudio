@@ -22,10 +22,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const AGENTS = { claude: '.claude', codex: '.codex' };
+const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 
 // Preserve an explicit editor choice while giving installer subprocesses a
 // predictable fallback on machines where EDITOR is unset or empty.
@@ -148,6 +149,38 @@ function installSkills(skillsDir, srcDir, names) {
   }
 }
 
+function commandWorks(command, args) {
+  try {
+    execFileSync(command, args, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// uv-created environments do not include pip by default. Use pip for conda or
+// pip-enabled environments, then fall back to uv targeting the same interpreter.
+function installPythonDeps(packages) {
+  if (commandWorks(PYTHON, ['-m', 'pip', '--version'])) {
+    const attempts = [
+      ['-m', 'pip', 'install', '-q', ...packages],
+      ['-m', 'pip', 'install', '--user', '--break-system-packages', '-q', ...packages],
+      ['-m', 'pip', 'install', '--user', '-q', ...packages],
+    ];
+    for (const args of attempts) {
+      try {
+        execFileSync(PYTHON, args, { stdio: 'inherit' });
+        return 'pip';
+      } catch { /* try the next safe installation mode */ }
+    }
+  }
+  if (commandWorks('uv', ['--version'])) {
+    execFileSync('uv', ['pip', 'install', '--python', PYTHON, '-q', ...packages], { stdio: 'inherit' });
+    return 'uv';
+  }
+  throw new Error(`could not install with pip or uv for ${PYTHON}`);
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 async function main() {
   say(`\n${C.b}${C.c}ResearchStudio installer${C.r}\n`);
@@ -230,9 +263,9 @@ async function main() {
       await askYN(`\nInstall Python deps now (${pips.join(', ')})?`, true));
     if (doPip) {
       try {
-        execSync(`python3 -m pip install --user -q ${pips.join(' ')}`, { stdio: 'inherit' });
-        say(`${C.g}✓${C.r} Python deps installed`);
-      } catch { say(`${C.y}! pip step failed — install those packages yourself later${C.r}`); }
+        const installer = installPythonDeps(pips);
+        say(`${C.g}✓${C.r} Python deps installed with ${installer} (${PYTHON})`);
+      } catch { say(`${C.y}! pip/uv step failed — install those packages yourself later${C.r}`); }
     }
   }
 
@@ -248,7 +281,7 @@ async function main() {
     say(`  ${C.c}# Debian/Ubuntu${C.r} (use brew/dnf/pacman on macOS/Fedora/Arch)`);
     say(`  sudo apt-get install -y poppler-utils libreoffice ffmpeg`);
     say(`  ${C.c}# Chromium for Paper2Poster HTML→PDF/PNG (~300 MB download)${C.r}`);
-    say(`  python3 -m playwright install chromium`);
+    say(`  ${PYTHON} -m playwright install chromium`);
   }
   say('');
   process.exit(0);

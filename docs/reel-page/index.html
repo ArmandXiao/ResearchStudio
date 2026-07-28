@@ -233,9 +233,10 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
 /* ---------- footer ---------- */
 .footer{background:var(--bg);border-top:1px solid var(--border);padding:16px 0;color:var(--fg-muted);font-size:.85rem;flex-shrink:0;margin-top:20px}
 .footer-row{max-width:var(--max);margin:0 auto;padding:0 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
-.footer-brand{display:flex;align-items:center;gap:8px}
+.footer-brand{display:flex;align-items:center;gap:8px;flex:1}
 .footer-brand img{border-radius:5px}
-.footer-links{display:flex;gap:18px}
+.footer-links{display:flex;gap:18px;flex:1;justify-content:flex-end}
+.footer-support{flex:1;color:var(--fg-faint);font-size:.8rem;text-align:center}
 .footer-links a{color:var(--fg-muted)} .footer-links a:hover{color:var(--fg)}
 
 @media (max-width:1740px){.topbar{padding-right:clamp(24px,calc(868px - 50vw),200px)}}
@@ -276,7 +277,7 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
       <span>ResearchStudio-<span class="reelmark"><span class="r">R</span><span class="e1">e</span><span class="e2">e</span><span class="l">l</span></span></span>
     </a>
     <ul class="nav-links">
-      <li><a href="https://github.com/microsoft/ResearchStudio/tree/main/ResearchStudio-Idea" target="_blank" rel="noopener"><span data-i18n="nav_idea">Explore Idea</span></a></li>
+      <li><a href="../idea-page/"><span data-i18n="nav_idea">Explore Idea</span></a></li>
       <li><a class="active" href="#top"><span data-i18n="nav_reel">Explore Reel</span></a></li>
     </ul>
     <div class="nav__cta">
@@ -390,11 +391,13 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
 <footer class="footer">
   <div class="footer-row">
     <div class="footer-brand">
-      <img src="figures/microsoft_logo.png" alt="Microsoft" height="30"/>
-      <span>ResearchStudio-Reel · Microsoft Research · MIT License</span>
+      <img src="assets/logo.svg" alt="" width="22" height="22"/>
+      <span>ResearchStudio · MIT License</span>
     </div>
+    <span class="footer-support" data-i18n="demo_support">Demo hosting supported by NTU.</span>
     <div class="footer-links">
-      <a href="https://aka.ms/ResearchStudio" target="_blank" rel="noopener" data-i18n="foot_project">Project</a>
+      <a href="https://github.com/microsoft/ResearchStudio" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/microsoft/ResearchStudio/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
     </div>
   </div>
 </footer>
@@ -428,7 +431,7 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
       gallery_h: 'The reel gallery',
       gallery_lead: 'Every tile is a real, unedited run. Hover to enlarge a poster; click to open its video, blog, interactive reel, and summary.',
       search_ph: 'Search titles, authors, venues…', view_wall: 'Wall', view_grid: 'Grid',
-      foot_project: 'Project',
+      foot_project: 'Project', demo_support: 'Demo hosting supported by NTU.',
       lb_poster: 'Poster', lb_video: 'Video', lb_blog: 'Blog', lb_reel: 'Reel', lb_about: 'About',
       open_pdf: 'Open poster PDF', open_pptx: 'Editable PPTX', dl_zh: 'Chinese blog (.docx)', dl_en: 'English blog (.docx)',
       open_reel: 'Open interactive reel', open_tab: 'Open in new tab', open_paper: 'Paper', loading: 'Loading reel…',
@@ -458,7 +461,7 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
       gallery_h: 'Reel 画廊',
       gallery_lead: '每个卡片都是真实、未经编辑的运行。悬停放大海报;点击打开它的视频、博客、交互 Reel 与摘要。',
       search_ph: '搜索标题、作者、会议…', view_wall: '滚动墙', view_grid: '网格',
-      foot_project: '项目',
+      foot_project: '项目', demo_support: 'Demo 托管由 NTU 提供支持。',
       lb_poster: '海报', lb_video: '视频', lb_blog: '博客', lb_reel: 'Reel', lb_about: '简介',
       open_pdf: '打开海报 PDF', open_pptx: '可编辑 PPTX', dl_zh: '中文博客 (.docx)', dl_en: '英文博客 (.docx)',
       open_reel: '打开交互 Reel', open_tab: '在新标签打开', open_paper: '论文', loading: '正在加载 Reel…',

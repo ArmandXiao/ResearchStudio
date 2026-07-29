@@ -65,27 +65,27 @@ a:hover{text-decoration:underline;text-underline-offset:3px}
 .mode-control summary::after,.language-control summary::after{content:'⌄';color:var(--brand-2);font-size:.8em;transition:transform .15s ease}
 .mode-control[open] summary::after,.language-control[open] summary::after{transform:rotate(180deg)}
 .mode-options,.language-options{position:absolute;top:calc(100% + 5px);right:0;width:108px;display:grid;gap:2px;padding:5px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elev);box-shadow:var(--shadow-md)}
-.mode-options button,.language-options button{border:0;background:transparent;color:var(--fg);font:inherit;font-size:13.5px;text-align:left;padding:6px 9px;border-radius:7px;cursor:pointer}
-.mode-options button:hover,.language-options button:hover{background:var(--bg-soft)}
-.mode-options button[aria-pressed="true"],.language-options button[aria-pressed="true"]{color:var(--brand-2);font-weight:600}
+.mode-options button,.language-options button{width:100%;height:34px;padding:0 9px;border:0;border-radius:6px;color:var(--fg-muted);background:transparent;font:inherit;font-size:14px;font-weight:500;text-align:left;cursor:pointer}
+.mode-options button:hover,.language-options button:hover{color:var(--fg);background:var(--bg-soft)}
+.mode-options button[aria-pressed="true"],.language-options button[aria-pressed="true"]{color:var(--brand-2)}
 
 /* ---------- topbar ---------- */
 .topbar-wrap{position:sticky;top:0;z-index:50;backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);background:color-mix(in srgb,var(--bg) 75%,transparent);border-bottom:1px solid color-mix(in srgb,var(--border) 70%,transparent)}
-.topbar{max-width:var(--max);margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:22px}
-.brand{display:inline-flex;align-items:center;gap:10px;font-weight:800;font-size:17px;letter-spacing:-.2px;color:var(--fg)}
+.topbar{max-width:1180px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:24px}
+.brand{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:17px;letter-spacing:-.01em;color:var(--fg)}
 .brand:hover{text-decoration:none}
-.brand img{display:inline-flex;border-radius:7px}
-.reelmark{font-weight:900;letter-spacing:-.5px}
-.reelmark .r{color:var(--ms-red)} .reelmark .e1{color:var(--ms-green)} .reelmark .e2{color:var(--ms-blue)} .reelmark .l{color:var(--ms-yellow)}
-.nav-links{display:flex;align-items:center;gap:4px;list-style:none;margin:0;padding:0}
+.brand img{display:inline-flex}
+.nav-links{display:flex;align-items:center;gap:22px;list-style:none;margin:0 0 0 16px;padding:0;flex:1}
 .nav-links li{display:inline-flex}
-.nav-links a{display:inline-flex;align-items:center;padding:7px 12px;border-radius:9px;color:var(--fg-muted);font-size:14.5px;font-weight:500}
-.nav-links a:hover{color:var(--fg);background:var(--bg-soft);text-decoration:none}
-.nav-links a.active{color:var(--brand-2);font-weight:600}
+.nav-links a{color:var(--fg-muted);font-size:14.5px;font-weight:500;padding:0;transition:color .15s ease}
+.nav-links a:hover{color:var(--fg);text-decoration:none}
+.nav-links a.active{color:var(--brand-2);font-weight:500}
 .nav__cta{margin-left:auto;display:flex;align-items:center;gap:10px}
-.nav__cta .btn{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;font-size:14px;font-weight:600;border:1px solid var(--border-strong);color:var(--fg);background:transparent;transition:.15s;white-space:nowrap}
-.nav__cta .btn:hover{background:var(--bg-soft);text-decoration:none;transform:translateY(-1px)}
+.nav__cta .btn{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border-radius:999px;font-size:14.5px;font-weight:600;border:1px solid transparent;cursor:pointer;white-space:nowrap;transition:transform .15s ease,box-shadow .15s ease,background .15s ease,color .15s ease,border-color .15s ease}
+.nav__cta .btn:hover{text-decoration:none;transform:translateY(-1px)}
 .nav__cta .btn svg{flex-shrink:0}
+.nav__cta .btn--ghost{background:var(--bg-elev);color:var(--fg);border-color:var(--border-strong)}
+.nav__cta .btn--ghost:hover{background:var(--bg-soft)}
 
 /* ---------- hero ---------- */
 .hero{position:relative;overflow:hidden;background:var(--bg);border-bottom:1px solid var(--border)}
@@ -100,9 +100,9 @@ html[data-theme="dark"] .hero__glow{opacity:.35}
 .hero h1{margin:0 0 10px;font-size:clamp(30px,4.6vw,46px);font-weight:800;letter-spacing:-1px;line-height:1.1}
 .hero h1 .grad{background:var(--brand-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .tagline{color:var(--fg-muted);font-size:16px;max-width:820px;margin:0 0 10px}
-.hero-row{display:flex;align-items:center;justify-content:space-between;gap:28px}
+.hero-row{display:flex;align-items:flex-start;justify-content:space-between;gap:28px}
 .hero-text{flex:1;min-width:0}
-.hero-cta{flex:0 0 auto;position:relative;overflow:hidden;display:flex;align-items:center;gap:14px;padding:16px 20px;border-radius:16px;background:var(--brand-grad);color:#fff;border:0;max-width:340px;transition:transform .2s,box-shadow .2s;box-shadow:0 14px 32px -10px color-mix(in srgb,var(--brand-2) 65%,transparent),0 4px 12px -4px color-mix(in srgb,var(--brand-3) 45%,transparent)}
+.hero-cta{flex:0 0 auto;position:relative;overflow:hidden;display:flex;align-items:center;gap:14px;padding:16px 20px;border-radius:16px;background:var(--brand-grad);color:#fff;border:0;width:340px;max-width:340px;transition:transform .2s,box-shadow .2s;box-shadow:0 14px 32px -10px color-mix(in srgb,var(--brand-2) 65%,transparent),0 4px 12px -4px color-mix(in srgb,var(--brand-3) 45%,transparent)}
 .hero-cta:hover{transform:translateY(-3px) scale(1.02);text-decoration:none;box-shadow:0 20px 46px -10px color-mix(in srgb,var(--brand-2) 78%,transparent),0 8px 18px -4px color-mix(in srgb,var(--brand-3) 55%,transparent)}
 .hero-cta::before{content:"";position:absolute;top:0;left:-60%;width:38%;height:100%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.42),transparent);transform:skewX(-18deg);animation:cta-shine 3.4s ease-in-out infinite}
 @keyframes cta-shine{0%,58%{left:-60%}100%{left:135%}}
@@ -122,8 +122,9 @@ html[data-theme="dark"] .hero__glow{opacity:.35}
 .stat{display:flex;flex-direction:column;gap:2px}
 .stat b{font-size:23px;font-weight:800;letter-spacing:-.3px;background:var(--brand-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .stat span{font-size:11.5px;color:var(--fg-faint);text-transform:uppercase;letter-spacing:.4px}
-.statsband{border-top:1px solid var(--border);margin-top:22px}
-.statsband .hero-note{margin:0 0 16px}
+.statsband{position:relative;z-index:1;border-top:0;margin-top:0}
+.statsband .hero-note{margin:16px 0 0}
+@media (min-width:821px){.statsband{transform:translateY(-18px)}}
 
 /* ---------- section frame ---------- */
 .section{max-width:var(--max);margin:0 auto;padding:34px 32px 6px;width:100%}
@@ -141,7 +142,6 @@ html[data-theme="dark"] .hero__glow{opacity:.35}
 .skill p{font-size:12px;line-height:1.5;color:var(--dim);margin:0}
 .skill .step{position:absolute;top:14px;right:14px;font-size:10.5px;font-weight:800;color:var(--fg-faint)}
 .skills .s1{--acc:var(--brand-2)} .skills .s2{--acc:var(--ms-red)} .skills .s3{--acc:var(--ms-blue)} .skills .s4{--acc:var(--ms-green)} .skills .s5{--acc:var(--brand-3)}
-.stats-note{margin:12px 0 0;font-size:12px;line-height:1.6;color:var(--fg-faint);max-width:820px}
 .skill-group{position:relative;border:1.5px solid color-mix(in srgb,var(--brand-2) 34%,var(--line));border-radius:16px;padding:24px 12px 12px;background:color-mix(in srgb,var(--brand-2) 4%,transparent)}
 .sg-head{position:absolute;top:-11px;left:16px;display:inline-flex;align-items:center;gap:7px;padding:0 9px;background:var(--bg);font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--dim)}
 .sg-num{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--brand-2);color:#fff;font-size:11px;font-weight:800}
@@ -173,21 +173,21 @@ html[data-theme="dark"] .hero__glow{opacity:.35}
 .count-note{font-size:12px;color:var(--fg-faint);font-weight:600}
 
 /* ---------- poster wall (auto-scrolling rows, hover to enlarge) ---------- */
-main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 auto}
+main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;flex:1 0 auto}
 .wall-row{position:relative;margin:6px 0 12px}
 .wall-lbl{display:flex;align-items:center;gap:9px;padding:0 32px;margin-bottom:-10px}
 .wall-lbl .wl-name{font-size:14px;font-weight:750;letter-spacing:-.2px;color:var(--fg)}
 .wall-lbl .wl-ref{font-size:11px;font-weight:700;color:var(--brand-2);vertical-align:super;margin:0 2px 0 1px}
 .wall-lbl .wl-ref:hover{text-decoration:underline}
 .wall-lbl .wl-count{font-size:11px;font-weight:700;color:var(--dim);background:var(--line);padding:2px 9px;border-radius:999px}
-.wall{display:flex;gap:16px;overflow-x:auto;scroll-behavior:smooth;padding:44px 32px;scrollbar-width:none}
+.wall{display:flex;gap:16px;overflow-x:auto;scroll-behavior:smooth;padding:32px;scrollbar-width:none}
 .wall::-webkit-scrollbar{display:none}
 .wall-wrap{position:relative}
 .cnav{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow-md);display:grid;place-items:center;cursor:pointer;z-index:30;color:var(--ink);transition:transform .15s,opacity .15s,background .15s;opacity:.9;padding:0}
 .cnav:hover{transform:translateY(-50%) scale(1.08);opacity:1;background:var(--bg-soft)}
 .cnav.prev{left:10px}.cnav.next{right:10px}
 .cnav svg{width:18px;height:18px}
-.tile{flex:0 0 auto;height:400px;border-radius:12px;overflow:hidden;position:relative;cursor:pointer;background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow-sm);transition:transform .28s cubic-bezier(.2,.8,.2,1),box-shadow .28s,border-color .28s}
+.tile{flex:0 0 auto;height:clamp(220px,31vh,340px);border-radius:12px;overflow:hidden;position:relative;cursor:pointer;background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow-sm);transition:transform .28s cubic-bezier(.2,.8,.2,1),box-shadow .28s,border-color .28s}
 .tile img{height:100%;width:auto;display:block;opacity:0;transition:opacity .4s ease}
 .tile img.loaded{opacity:1}
 .tile .cap{position:absolute;left:0;right:0;bottom:0;padding:22px 12px 9px;font-size:11.5px;font-weight:650;line-height:1.3;color:#fff;background:linear-gradient(to top,rgba(0,0,0,.82),rgba(0,0,0,.35) 55%,transparent);opacity:0;transform:translateY(6px);transition:.28s;pointer-events:none;white-space:normal;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -232,22 +232,37 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
 
 /* ---------- footer ---------- */
 .footer{background:var(--bg);border-top:1px solid var(--border);padding:16px 0;color:var(--fg-muted);font-size:.85rem;flex-shrink:0;margin-top:20px}
-.footer-row{max-width:var(--max);margin:0 auto;padding:0 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.footer-row{max-width:1180px;margin:0 auto;padding:0 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
 .footer-brand{display:flex;align-items:center;gap:8px;flex:1}
 .footer-brand img{border-radius:5px}
 .footer-links{display:flex;gap:18px;flex:1;justify-content:flex-end}
 .footer-support{flex:1;color:var(--fg-faint);font-size:.8rem;text-align:center}
 .footer-links a{color:var(--fg-muted)} .footer-links a:hover{color:var(--fg)}
 
-@media (max-width:1740px){.topbar{padding-right:clamp(24px,calc(868px - 50vw),200px)}}
-@media (max-width:880px){.nav-links{display:none}}
+@media (max-width:1540px){.topbar{padding-right:clamp(24px,calc(776px - 50vw),190px)}}
+@media (max-width:820px){.nav-links{display:none}}
 @media (max-width:760px){
-  .page-controls{top:10px;right:14px;gap:6px}
+  .topbar{padding-right:140px}
+  .page-controls{top:14px;right:16px;gap:6px}
   .hero .container{padding:38px 18px 24px}
   .section,.controls{padding-left:18px;padding-right:18px}
   .wall{padding-left:18px;padding-right:18px}
   .wall-lbl{padding-left:18px;padding-right:18px}
   .lb-panel{height:94vh}
+}
+@media (max-width:480px){
+  .topbar{gap:12px;padding:12px 16px;padding-right:140px}
+  .nav__cta .btn--ghost{gap:0;padding:8px 10px}
+  .nav__cta .btn--ghost > :not(svg){position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+}
+@media (max-width:600px){
+  .footer-support{order:3;flex-basis:100%;text-align:left}
+}
+@media (max-width:760px){
+  .mode-control summary,.language-control summary{font-size:12px}
+}
+@media (max-width:520px){
+  .brand span{display:none}
 }
 </style>
 </head>
@@ -266,22 +281,23 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
     <div class="language-options" aria-label="Language options">
       <button type="button" data-language-option="en" lang="en" data-i18n="language_en">English</button>
       <button type="button" data-language-option="zh" lang="zh-CN" data-i18n="language_zh">Chinese</button>
+      <button type="button" data-language-option="es" lang="es" data-i18n="language_es">Spanish</button>
     </div>
   </details>
 </div>
 
 <div class="topbar-wrap">
   <nav class="topbar">
-    <a class="brand" href="https://microsoft.github.io/ResearchStudio/">
+    <a class="brand" href="../">
       <img src="assets/logo.svg" alt="" width="28" height="28"/>
-      <span>ResearchStudio-<span class="reelmark"><span class="r">R</span><span class="e1">e</span><span class="e2">e</span><span class="l">l</span></span></span>
+      <span>ResearchStudio</span>
     </a>
     <ul class="nav-links">
       <li><a href="../idea-page/"><span data-i18n="nav_idea">Explore Idea</span></a></li>
       <li><a class="active" href="#top"><span data-i18n="nav_reel">Explore Reel</span></a></li>
     </ul>
     <div class="nav__cta">
-      <a class="btn" href="https://github.com/microsoft/ResearchStudio" target="_blank" rel="noopener">
+      <a class="btn btn--ghost" href="https://github.com/microsoft/ResearchStudio" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.01-.02-1.99-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.97.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.19 1.18a11.1 11.1 0 0 1 5.81 0c2.22-1.49 3.19-1.18 3.19-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.43-2.69 5.4-5.26 5.69.41.36.78 1.07.78 2.16 0 1.56-.01 2.81-.01 3.19 0 .31.21.68.8.56 4.56-1.52 7.85-5.83 7.85-10.91C23.5 5.65 18.35.5 12 .5z"/></svg>
         <span data-i18n="github">Open on GitHub</span>
       </a>
@@ -305,15 +321,27 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
       <span class="hero-cta-txt">
         <span class="hero-cta-badge"><span class="dot"></span><span data-i18n="demo_badge">Live demo</span></span>
         <span class="hero-cta-h" data-i18n="demo_h">Make your own poster</span>
-        <span class="hero-cta-sub" data-i18n="demo_sub">Turn any paper into one — try it now</span>
+        <span class="hero-cta-sub" data-i18n="demo_sub">Turn any paper into a unified artifact — try it now</span>
       </span>
       <svg class="hero-cta-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M7 17L17 7M17 7H8M17 7v9"/></svg>
     </a>
   </div>
+<!-- ---------- stats band ---------- -->
+<section class="section statsband">
+  <div class="stats">
+    <div class="stat"><b>100</b><span data-i18n="stat_papers">Benchmark papers</span></div>
+    <div class="stat"><b>5</b><span data-i18n="stat_skills">Composable skills</span></div>
+    <div class="stat"><b>3</b><span data-i18n="stat_artifacts">Artifacts / paper</span></div>
+    <div class="stat"><b>3.56<span style="font-size:14px;color:var(--fg-faint);-webkit-text-fill-color:var(--fg-faint)"> vs 3.03</span></b><span data-i18n="stat_aesthetic">Poster aesthetics vs authors</span></div>
+    <div class="stat"><b>74–95<span style="font-size:14px;color:var(--fg-faint);-webkit-text-fill-color:var(--fg-faint)">/100</span></b><span data-i18n="stat_wins">Wins vs author posters</span></div>
+  </div>
+  <p class="hero-note" data-i18n="hero_note">Each reel is an unedited end-to-end run on the 100-paper Paper2Poster benchmark. A shared extraction pass keeps every poster, video, and blog grounded in the same evidence.</p>
+</section>
 </header>
 
+
 <!-- ---------- gallery ---------- -->
-<section class="section" id="gallery-top" style="padding-bottom:0">
+<section class="section" id="gallery-top" style="padding-top:20px;padding-bottom:0">
   <div class="section-h gallery-head">
     <h2 data-i18n="gallery_h">The reel gallery</h2>
     <span class="sub"><span class="count-note" id="count-note"></span> · Paper2Poster benchmark<a class="wl-ref" href="https://paper2poster.github.io/" target="_blank" rel="noopener" title="https://paper2poster.github.io/">[1]</a></span>
@@ -359,18 +387,6 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
   </div>
 </section>
 
-<!-- ---------- stats band ---------- -->
-<section class="section statsband">
-  <p class="hero-note" data-i18n="hero_note">Every reel below is an unedited end-to-end run on the 100-paper Paper2Poster benchmark. One shared extraction pass reads the paper once and feeds every generator, so the poster, video, and blog stay grounded in the same figures, numbers, and claims. Click any poster to open its interactive reel.</p>
-  <div class="stats">
-    <div class="stat"><b>100</b><span data-i18n="stat_papers">Benchmark papers</span></div>
-    <div class="stat"><b>5</b><span data-i18n="stat_skills">Composable skills</span></div>
-    <div class="stat"><b>3</b><span data-i18n="stat_artifacts">Artifacts / paper</span></div>
-    <div class="stat"><b>3.56<span style="font-size:14px;color:var(--fg-faint);-webkit-text-fill-color:var(--fg-faint)"> vs 3.03</span></b><span data-i18n="stat_aesthetic">Poster aesthetics vs authors</span></div>
-    <div class="stat"><b>74–95<span style="font-size:14px;color:var(--fg-faint);-webkit-text-fill-color:var(--fg-faint)">/100</span></b><span data-i18n="stat_wins">Wins vs author posters</span></div>
-  </div>
-  <p class="stats-note" data-i18n="stats_note">Poster aesthetics and win-rate are scored against the papers' original author posters on the Paper2Poster benchmark (100 papers).</p>
-</section>
 
 <!-- ---------- lightbox ---------- -->
 <div id="lb">
@@ -412,11 +428,10 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
       title: 'ResearchStudio-Reel Gallery',
       nav_idea: 'Explore Idea', nav_reel: 'Explore Reel', github: 'Open on GitHub',
       theme_label: 'Theme', theme_light: 'Light', theme_dark: 'Dark',
-      language_label: 'Language', language_en: 'English', language_zh: 'Chinese',
-      hero_t1: 'One paper in.', hero_t2: 'A poster, a video, a blog out.', demo_badge: 'Live demo', demo_h: 'Make your own poster', demo_sub: 'Turn any paper into one — try it now',
+      language_label: 'Language', language_en: 'English', language_zh: 'Chinese', language_es: 'Spanish',
+      hero_t1: 'One paper in.', hero_t2: 'A poster, a video, a blog out.', demo_badge: 'Live demo', demo_h: 'Make your own poster', demo_sub: 'Turn any paper into a unified artifact — try it now',
       tagline: 'ResearchStudio-Reel automates the last mile of research — turning a single accepted-paper PDF into a print-ready conference poster, a narrated talk video, and a bilingual blog, all bound into one interactive reel.',
-      hero_note: 'Every reel below is an unedited end-to-end run on the 100-paper Paper2Poster benchmark. One shared extraction pass reads the paper once and feeds every generator, so the poster, video, and blog stay grounded in the same figures, numbers, and claims. Click any poster to open its interactive reel.',
-      stats_note: 'Poster aesthetics and win-rate are scored against the papers\' original author posters on the Paper2Poster benchmark (100 papers).',
+      hero_note: 'Each reel is an unedited end-to-end run on the 100-paper Paper2Poster benchmark. A shared extraction pass keeps every poster, video, and blog grounded in the same evidence.',
       sg_label: 'Generate — in parallel',
       stat_reels: 'Reels shown', stat_papers: 'Benchmark papers', stat_skills: 'Composable skills',
       stat_artifacts: 'Artifacts / paper', stat_aesthetic: 'Poster aesthetics vs authors', stat_wins: 'Wins vs author posters',
@@ -440,13 +455,12 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
     },
     zh: {
       title: 'ResearchStudio-Reel 画廊',
-      nav_idea: '探索 Idea', nav_reel: '探索 Reel', github: '在 GitHub 打开',
+      nav_idea: '探索 Idea', nav_reel: '探索 Reel', github: '在 GitHub 查看',
       theme_label: '主题', theme_light: '浅色', theme_dark: '深色',
-      language_label: '语言', language_en: '英文', language_zh: '中文',
+      language_label: '语言', language_en: '英语', language_zh: '中文', language_es: '西班牙语',
       hero_t1: '一篇论文进,', hero_t2: '海报、视频、博客同时产出。', demo_badge: '在线体验', demo_h: '生成你的海报', demo_sub: '把任意论文变成海报,立即试用',
       tagline: 'ResearchStudio-Reel 自动化科研的"最后一公里"——把一篇录用论文的 PDF 一次性转成可印刷会议海报、带解说的讲解视频,以及中英双语博客,并汇聚成一个可交互的 Reel。',
-      hero_note: '下方每个 Reel 都是在 100 篇 Paper2Poster 基准上未经人工编辑的端到端运行。一次共享的抽取先把论文读一遍再喂给每个生成器,因此海报、视频与博客都锚定在相同的图、数字与论断上。点击任意海报即可打开它的交互 Reel。',
-      stats_note: '海报美观度与胜率均在 Paper2Poster 基准(100 篇)上、对阵论文原作者的海报进行评测。',
+      hero_note: '每个 Reel 都是 Paper2Poster 100 篇论文基准上的未经编辑端到端运行。一次共享抽取让海报、视频和博客始终基于同一组图表、数据与论断。',
       sg_label: '生成 · 并行',
       stat_reels: '展示的 Reel', stat_papers: '基准论文数', stat_skills: '可组合技能',
       stat_artifacts: '每篇产出物', stat_aesthetic: '海报美观度 vs 作者', stat_wins: '对阵作者海报胜出',
@@ -467,6 +481,35 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
       open_reel: '打开交互 Reel', open_tab: '在新标签打开', open_paper: '论文', loading: '正在加载 Reel…',
       no_asset: '该运行暂无此产物。', reel_hint: 'Reel 查看器会从资源服务器加载视频与图片,请稍候。',
       count_tpl: '{n} 个 Reel'
+    },
+    es: {
+      title: 'Galería ResearchStudio-Reel',
+      nav_idea: 'Explorar Idea', nav_reel: 'Explorar Reel', github: 'Ver en GitHub',
+      theme_label: 'Tema', theme_light: 'Claro', theme_dark: 'Oscuro',
+      language_label: 'Idioma', language_en: 'Inglés', language_zh: 'Chino', language_es: 'Español',
+      hero_t1: 'Un artículo entra.', hero_t2: 'Un póster, un vídeo y un blog salen.', demo_badge: 'Demo en vivo', demo_h: 'Crea tu propio póster', demo_sub: 'Convierte cualquier artículo en uno — pruébalo ahora',
+      tagline: 'ResearchStudio-Reel automatiza la etapa final de la investigación: convierte el PDF de un artículo aceptado en un póster listo para imprimir, un vídeo narrado y un blog bilingüe, reunidos en un reel interactivo.',
+      hero_note: 'Cada reel es una ejecución integral sin editar sobre los 100 artículos del benchmark Paper2Poster. Una extracción compartida mantiene el póster, el vídeo y el blog basados en la misma evidencia.',
+      sg_label: 'Generar — en paralelo',
+      stat_reels: 'Reels mostrados', stat_papers: 'Artículos del benchmark', stat_skills: 'Habilidades combinables',
+      stat_artifacts: 'Resultados por artículo', stat_aesthetic: 'Estética frente a autores', stat_wins: 'Victorias frente a autores',
+      skills_h: 'Cinco habilidades, un flujo', skills_sub: 'extraer una vez · generar de tres formas · integrar',
+      skills_lead: 'ResearchStudio-Reel funciona como cinco habilidades combinables dentro de Claude Code y Codex. Un extractor compartido lee el artículo una vez; tres generadores producen materiales editables desde el mismo paquete; y una capa de integración los reúne en una única superficie navegable.',
+      sk_assets: 'Lee el PDF una vez y crea un paquete reutilizable con texto, figuras depuradas, pies, metadatos y una especificación de nueve secciones para todos los generadores.',
+      sk_poster: 'Compone un póster listo para imprimir en HTML, PDF, PNG y PowerPoint editable, ajustado mediante un ciclo de llenado medido.',
+      sk_video: 'Planifica la narración y crea un vídeo subtitulado con una presentación editable y destacados visuales alineados con la voz.',
+      sk_blog: 'Redacta un paquete editorial bilingüe: una versión china para WeChat y un blog de investigación en inglés, como archivos Word editables con la misma base de evidencia.',
+      sk_reel: 'Integra regiones del póster, segmentos de vídeo, miniaturas, subtítulos y pasajes del blog en un visor interactivo y descargable.',
+      fig_video: 'Vídeo narrado con destacados alineados', fig_blog: 'Paquete editorial bilingüe', fig_reel: 'Un reel interactivo que integra los tres',
+      gallery_h: 'Galería de reels',
+      gallery_lead: 'Cada elemento es una ejecución real sin editar. Pasa el cursor para ampliar un póster; haz clic para abrir su vídeo, blog, reel interactivo y resumen.',
+      search_ph: 'Buscar títulos, autores, conferencias…', view_wall: 'Muro', view_grid: 'Cuadrícula',
+      foot_project: 'Proyecto', demo_support: 'Alojamiento de la demo con el apoyo de NTU.',
+      lb_poster: 'Póster', lb_video: 'Vídeo', lb_blog: 'Blog', lb_reel: 'Reel', lb_about: 'Acerca de',
+      open_pdf: 'Abrir PDF del póster', open_pptx: 'PPTX editable', dl_zh: 'Blog en chino (.docx)', dl_en: 'Blog en inglés (.docx)',
+      open_reel: 'Abrir reel interactivo', open_tab: 'Abrir en una pestaña nueva', open_paper: 'Artículo', loading: 'Cargando reel…',
+      no_asset: 'No disponible para esta ejecución.', reel_hint: 'El visor carga el vídeo y las figuras desde el servidor de recursos; espera un momento.',
+      count_tpl: '{n} reels'
     }
   };
   window.I18N = copy; // gallery.js reads the active dict for dynamic strings
@@ -477,14 +520,15 @@ main{max-width:var(--max);margin:0 auto;padding:10px 0 10px;width:100%;flex:1 0 
   const themeOptions = document.querySelectorAll('[data-theme-option]');
   let language;
   try { language = localStorage.getItem('researchstudio-language'); } catch (_) {}
-  if (!['en', 'zh'].includes(language)) {
-    language = (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+  if (!['en', 'zh', 'es'].includes(language)) {
+    const browserLanguage = (navigator.language || '').toLowerCase();
+    language = browserLanguage.startsWith('zh') ? 'zh' : browserLanguage.startsWith('es') ? 'es' : 'en';
   }
 
   function applyLanguage(next) {
     language = next;
     window.LANG = language;
-    document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+    document.documentElement.lang = language === 'zh' ? 'zh-CN' : language === 'es' ? 'es' : 'en';
     document.title = copy[language].title;
     document.querySelectorAll('[data-i18n]').forEach(el => {
       const v = copy[language][el.dataset.i18n];

@@ -664,7 +664,7 @@ code {
   .hero__glow--a { top: -80px; left: -80px; }
   .hero__glow--b { top: -40px; right: -60px; }
 
-  .topbar { gap: 12px; padding: 12px 16px; }
+  .topbar { gap: 12px; padding: 12px 140px 12px 16px; }
   .nav__cta .btn--ghost {
     gap: 0;
     padding: 8px 10px;

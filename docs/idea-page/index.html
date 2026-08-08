@@ -169,7 +169,10 @@ main{max-width:var(--max);margin:0 auto;padding:6px 0 60px;width:100%;flex:1 0 a
 .cat-name{font-size:16.5px;font-weight:750;letter-spacing:-.2px}
 .cat-count{font-size:12px;color:var(--dim);font-weight:600;background:var(--line);padding:2px 9px;border-radius:999px}
 .carousel-wrap{position:relative}
-.carousel{display:flex;gap:16px;overflow-x:auto;scroll-behavior:smooth;padding:4px 32px 14px;scrollbar-width:none}
+/* No scroll-behavior:smooth here — the marquee writes scrollLeft every frame and CSS
+   smoothing turns each write into a competing animation. Arrow buttons pass
+   behavior:"smooth" explicitly to scrollBy(), so they are unaffected. */
+.carousel{display:flex;gap:16px;overflow-x:auto;padding:4px 32px 14px;scrollbar-width:none}
 .carousel::-webkit-scrollbar{display:none}
 .cnav{position:absolute;top:38%;transform:translateY(-50%);width:36px;height:36px;border-radius:50%;background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow-md);display:grid;place-items:center;cursor:pointer;z-index:5;color:var(--ink);transition:.2s;opacity:.9}
 .cnav:hover{transform:translateY(-50%) scale(1.08);opacity:1}

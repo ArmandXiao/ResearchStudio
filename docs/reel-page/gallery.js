@@ -120,13 +120,21 @@ let tracks = [];
 function setupAutoScroll(){
   tracks = [];
   document.querySelectorAll("#wall-view .wall").forEach((track, idx) => {
-    const singleWidth = track.scrollWidth;
-    if (singleWidth <= track.clientWidth + 4) return; // fits, no loop needed
+    if (track.scrollWidth <= track.clientWidth + 4) return; // fits, no loop needed
     track.style.scrollBehavior = "auto";
+    const originalCount = track.children.length;
+    if (!originalCount) return;
     track.insertAdjacentHTML("beforeend", track.innerHTML); // duplicate for a seamless wrap
+    // True loop period = distance between a tile and its clone. scrollWidth is WRONG here
+    // because .wall has horizontal padding, which would make every wrap visibly jump.
+    const kids = track.children;
+    const period = kids[originalCount]
+      ? kids[originalCount].offsetLeft - kids[0].offsetLeft
+      : track.scrollWidth / 2;
+    if (period <= 0) return;
     const dir = idx % 2 ? -1 : 1;                           // alternate row directions
-    if (dir < 0) track.scrollLeft = singleWidth;
-    const state = { el: track, singleWidth, paused: false, dir };
+    if (dir < 0) track.scrollLeft = period;
+    const state = { el: track, period, paused: false, dir };
     // Pause ONLY while the cursor is over an actual poster tile — not the gaps/padding.
     track.addEventListener("mousemove", (e) => { state.paused = !!(e.target.closest && e.target.closest(".tile")); });
     track.addEventListener("mouseleave", () => { state.paused = false; });
@@ -142,9 +150,11 @@ function setupAutoScroll(){
 (function tick(){
   if (!REDUCE_MOTION) tracks.forEach(s => {
     if (s.paused) return;
-    s.el.scrollLeft += SPEED * s.dir;
-    if (s.el.scrollLeft >= s.singleWidth) s.el.scrollLeft -= s.singleWidth;
-    else if (s.el.scrollLeft <= 0) s.el.scrollLeft += s.singleWidth;
+    const next = s.el.scrollLeft + SPEED * s.dir;
+    // Wrap by exactly one period, and ONLY on the edge this row is travelling toward.
+    // Checking both edges makes each wrap land on the other edge's trigger -> per-frame ping-pong.
+    if (s.dir > 0) s.el.scrollLeft = next >= s.period ? next - s.period : next;
+    else           s.el.scrollLeft = next <= 0        ? next + s.period : next;
   });
   requestAnimationFrame(tick);
 })();

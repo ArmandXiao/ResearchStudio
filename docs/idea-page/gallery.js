@@ -187,8 +187,11 @@ window.addEventListener("resize", () => {
   if (!REDUCE_MOTION) {
     carouselTracks.forEach(s => {
       if (s.paused) return;
-      s.el.scrollLeft += CAROUSEL_SPEED;
-      if (s.el.scrollLeft >= s.singleWidth) s.el.scrollLeft -= s.singleWidth;
+      // Shift by exactly one period so the wrap is phase-continuous and invisible.
+      // Never clamp the landing position: clamping leaves a residual offset that
+      // accumulates into a visible jump.
+      const next = s.el.scrollLeft + CAROUSEL_SPEED;
+      s.el.scrollLeft = next >= s.singleWidth ? next - s.singleWidth : next;
     });
   }
   requestAnimationFrame(tickCarousels);

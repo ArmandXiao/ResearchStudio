@@ -37,6 +37,9 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,6 +83,48 @@ def page(chromium):
         pg = browser.new_page(viewport={"width": 1200, "height": 900})
         yield pg
         browser.close()
+
+
+def test_decimal_canvas_render_stays_on_one_pdf_page(
+    chromium, tmp_path: Path
+) -> None:
+    """The rounded A0 viewport must not create a blank trailing PDF page."""
+    if shutil.which("pdfinfo") is None:
+        pytest.skip("pdfinfo not installed")
+
+    html = tmp_path / "poster.html"
+    html.write_text(
+        """<!doctype html><html><head><style>
+        @page { size: 33.1in 46.8in; margin: 0; }
+        html, body { margin: 0; padding: 0; }
+        #poster-stage { position: relative; width: 3178px; height: 4493px;
+                        overflow: hidden; }
+        .poster { position: absolute; inset: 0; width: 3178px; height: 4494px;
+                  transform: scale(0.99977748); transform-origin: top left;
+                  background: white; }
+        </style></head><body><div id="poster-stage"><main class="poster"
+        data-measure-role="poster"><p>Portrait PDF rounding gate</p></main>
+        </div></body></html>""",
+        encoding="utf-8",
+    )
+    renderer = SKILL / "scripts" / "render_poster.py"
+    rendered = subprocess.run(
+        [sys.executable, str(renderer), str(html)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    combined = rendered.stdout + rendered.stderr
+    assert "PDF content scale=0.999874" in combined
+
+    info = subprocess.run(
+        ["pdfinfo", str(tmp_path / "poster.pdf")],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert re.search(r"(?m)^Pages:\s+1\s*$", info), info
 
 
 # --------------------------------------------------------------------------

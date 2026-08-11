@@ -59,30 +59,50 @@ The lean first render holds only each section's essential text. A **measured fil
 | **Landscape** (default) | 60 × 36 in (5:3) | NeurIPS · ICML · CVPR |
 | **Portrait** (`POSTER_ORIENTATION=portrait`) | A0, 33.1 × 46.8 in | ACL · NAACL · AAAI |
 
-Landscape posters are **composed at build time** from independent layout × style × header modules (see [Header, logos & QR](#header-logos--qr)); portrait keeps dedicated `poster_portrait_{full,half}_solid.html` templates. The renderer routes by orientation, then by the Method figure's aspect ratio.
+Both orientations are **composed at build time** instead of selecting a monolithic template. Landscape uses `assets/layouts/{full,half,3col}.html`; Portrait uses `assets/layouts_portrait/{full,half}.html`. They share 9 themes and the same style sources, while each orientation has its own five-header family. Landscape enables all 11 styles; Portrait enables 9. The renderer routes by orientation, then by the Method figure's aspect ratio.
 
 ## Header, logos & QR
 
-The column **layout**, visual **style**, title-band **header**, and **Scan-to-Read** internal layout are four independent axes, composed into one self-contained file by `references/compose_poster.py` (no N×M×K×J template explosion):
+`references/compose_poster.py` combines independent axes into one self-contained file. Layout, style, header, and theme apply to both orientations; Scan-to-Read is Landscape-only:
 
-- **Layout** — `assets/layouts/{full,half,3col}.html` (column structure).
-- **Style** — `assets/styles/*.css` — 11 visual treatments (solid · framed · simple · left-bar · elevated · neo-brutal · tag · underline · tinted · double-rule · legend-frame), randomized by default. `double-rule` and `legend-frame` centre their heading; the other 9 are left-aligned.
-- **Header** — `assets/headers/{v1…v5}.html`, randomized by default: v1 venue-left · v2 venue-right · v3 centered strip · v4 title-left / logos-right · v5 classic text badge.
-- **Scan** — `assets/scan/{aside,hero,contact,directory,banner,twin,chips}.html`, the Scan-to-Read internal layout. The build picks `--scan single` (paper only) or `dual` (paper + code) and compose samples a fitting variant, so a 2-QR layout never lands on a 1-QR paper.
+- **Layout** — Landscape `assets/layouts/{full,half,3col}.html`; Portrait `assets/layouts_portrait/{full,half}.html`. Portrait Half has two columns with exactly one bottom `.grow` per column. Portrait Full has four content bands, including a `1.5fr 1fr 1fr` Results band and full-width Takeaway.
+- **Style:** `assets/styles/*.css`. Landscape randomizes across all 11 visual treatments. Portrait excludes `underline` and `double-rule`, leaving 9 eligible styles, because those horizontal rules create misleading section divisions in narrow columns.
+- **Header** — Landscape `assets/headers/{v1…v5}.html`; Portrait `assets/headers_portrait/{pv1…pv5}.html`. Each orientation randomizes across its own five-header pool. Portrait uses five structural arrangements: balanced triptych (`pv1`), full-width masthead over a navigation strip (`pv2`), left editorial copy followed by institution marks and an outer-right Venue/QR rail (`pv3`), the center-aligned reverse triptych of pv1 (`pv4`), and the mirrored outer-left Venue/QR plus institution marks beside right editorial copy (`pv5`). In the navigation variants, one vertical divider separates Venue/QR from institution marks while the marks remain adjacent to the paper information and retain an independent `fit_logos.py` zone.
+- **Theme** — 9 shared academic palettes: blue · teal · green · burgundy · purple · rust · slate · plum · mono.
+- **Scan** — Landscape only, from `assets/scan/{aside,hero,contact,directory,banner,twin,chips}.html`. The build picks `--scan single` (paper only) or `dual` (paper + code), then samples a fitting variant. Portrait has no standalone scan section or scan axis; its headers own the QR slots.
 
 **Venue logo** — `paper2assets` best-effort fetches the conference mark (Wikipedia / Wikidata) into `assets/logos/_venue.png`; the header shows that logo and hides the venue-year text so the two never duplicate. The venue is always the **real conference / journal** — never "arXiv" (a preprint host is not a publication venue).
 
-**Institution logos** — `references/fit_logos.py` packs the institution marks to fill the header zone at a single **uniform height** (every logo enlarges together, sized by the browser's true aspect ratio so even wide SVG wordmarks fit without overflowing the band).
+**Institution logos** — `references/fit_logos.py` packs the institution marks to fill the header zone at a single **uniform height** (every logo enlarges together, sized by the browser's true aspect ratio so even wide SVG wordmarks fit without overflowing the band). Landscape headers expose six logo slots; Portrait headers expose four.
 
-**QR codes** — the Paper / Code QRs live in the **Scan to Read** section (its internal layout is the scan axis above) for headers v1–v4; the v5 classic header carries a QR in the title band itself. The **3col layout suppresses Scan-to-Read** (its 1/3-width column would read empty) and is kept off v5 — a 3col poster carries no QR.
+**QR codes** — in Landscape, the Paper / Code QRs live in the **Scan to Read** section for headers v1–v4; the v5 classic header carries a QR in the title band itself. The **3col layout suppresses Scan-to-Read** and is kept off v5, so a 3col poster carries no QR. Portrait has no standalone Scan-to-Read section and uses only its selected `pv1`–`pv5` header's QR slots.
+
+## Deterministic diversity for batches
+
+The default `random` values are reproducible. Seed precedence is explicit `--seed`, then `POSTER_SEED`, then the resolved absolute `--out` path, so separate paper directories naturally receive different combinations.
+
+For a 30+ paper gallery, pass consecutive zero-based `--variant-index` values with one shared `--variant-seed` (or `POSTER_VARIANT_SEED`). The sampler deterministically orders the joint random-axis combination space without replacement, so complete style/header/theme tuples do not repeat while unused combinations remain; it simultaneously keeps each axis marginally balanced. Landscape covers 11 styles in 11 posters; Portrait covers its 9 eligible styles in 9 posters; 5 posters cover all 5 Portrait headers; and 9 cover all 9 themes. Keep `--layout` driven by the Method figure unless layout itself should be sampled.
+
+```bash
+python references/compose_poster.py --orientation portrait \
+  --layout full --style random --header random --theme random \
+  --variant-index 17 --variant-seed portrait-wave-20260810 \
+  --selection-out <outdir>/selection.json \
+  --out <outdir>/poster.html
+```
+
+Every composed HTML embeds the resolved manifest in `#paper2poster-composition` and stamps the main axes on `<body data-poster-...>`. `--selection-out` writes the same metadata as external JSON for gallery audits and tests.
 
 ## Tuning knobs (env vars)
 
 | Var | Default | Controls |
 |---|---|---|
 | `POSTER_ORIENTATION` | `landscape` | `landscape` or `portrait` |
-| `POSTER_STYLE` | random | landscape style: 1 of 11 (`solid` … `legend-frame`) |
-| `POSTER_HEADER` | random | title-band header `v1`–`v5` (see [Header, logos & QR](#header-logos--qr)) |
+| `POSTER_STYLE` | `random` | Landscape: 1 of 11; Portrait: 1 of 9, excluding `underline` and `double-rule` |
+| `POSTER_HEADER` | `random` | Landscape `v1`–`v5`; Portrait `pv1`–`pv5` |
+| `POSTER_THEME` | `random` | shared theme: 1 of 9 (`blue` … `mono`) |
+| `POSTER_SEED` | resolved absolute output path | stable seed for ordinary random-axis selection; explicit `--seed` wins |
+| `POSTER_VARIANT_SEED` | ordinary seed | shared batch seed used with `--variant-index` for balanced cycles |
 | `POSTER_FONT` | `Arial` | any of 8 PPT-safe families (Arial round-trips with no font embedding) |
 | `POSTER_FULL_THRESHOLD` | `0.90` | the fill-loop's FULL gate (raise for a tighter pack, ~2× loop time) |
 | `POSTER_EXPAND_THRESHOLD` | `0.98` | render-time expand target (`0` disables) |

@@ -8,8 +8,9 @@
   /* White surface; keep --text near-black (#1c1c1c from base). A muted slate
      accent reads as a quiet editorial mark rather than a saturated brand color. */
   --bg: #ffffff;
-  --accent: #38465c;
-  --section-accent: #38465c;
+  /* Accent stays theme-driven. This keeps STYLE and COLOR orthogonal, so a
+     simple+teal poster is visibly different from simple+rust or simple+mono. */
+  --section-accent: var(--accent);
   /* Header theme (--tb-* contract): transparent header on the white page, a
      near-black title, white logo chips, NO fill/border — just the thin bottom
      rule added below. */

@@ -33,6 +33,25 @@ from utils.cli_common import eprint as _eprint, import_playwright  # noqa: E402
 from utils.textutil import ascii_safe  # noqa: E402
 
 
+def _pdf_content_scale(
+    canvas_in: tuple[float, float], viewport_px: tuple[int, int]
+) -> float:
+    """Keep a rounded Chromium viewport inside the exact physical page.
+
+    ``viewport_for`` must return integer CSS pixels, while a decimal-inch
+    canvas such as Portrait A0 (33.1 x 46.8 in) maps to fractional pixels at
+    96 ppi.  When rounding goes up, printing the integer-sized document at
+    scale 1 can spill a fraction of a pixel onto a blank second PDF page.
+    Scale only by that rounding delta; integer canvases such as 60 x 36 in
+    remain exactly 1.0.
+    """
+    w_in, h_in = canvas_in
+    w_px, h_px = viewport_px
+    if w_px <= 0 or h_px <= 0:
+        return 1.0
+    return min(1.0, (w_in * 96.0) / w_px, (h_in * 96.0) / h_px)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(__doc__ or "").splitlines()[0]
@@ -152,7 +171,9 @@ def _autopack_header_logos(html_path: Path) -> None:
     zone (multi-row, grown to fit) instead of one tiny row. This is a manual
     step in the docs that the agent routinely skips, so run it here right before
     rendering. Soft: any failure just leaves the raw logos and never blocks the
-    render (best-effort, like the render-time expand pass)."""
+    render (best-effort, like the render-time expand pass). A non-zero fitter
+    exit is still surfaced as a warning so the render log distinguishes
+    "attempted" from "successfully packed"."""
     import subprocess
     fit = Path(__file__).resolve().parent.parent / "references" / "fit_logos.py"
     if not fit.exists():
@@ -163,6 +184,12 @@ def _autopack_header_logos(html_path: Path) -> None:
         for line in (r.stdout or "").splitlines():
             if "baked" in line or "fit_logos" in line:
                 print(f"[render_preview] {line.strip()}")
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "no diagnostic output").strip()
+            _eprint(
+                f"[render_preview] WARN: fit_logos auto-pack exited "
+                f"with status {r.returncode}: {ascii_safe(detail)}"
+            )
     except Exception as e:                       # noqa: BLE001 -- soft, never block render
         _eprint(f"[render_preview] fit_logos auto-pack skipped ({e})")
 
@@ -402,10 +429,17 @@ def main() -> int:
             _bake_scan_suppress_into_html(html_path)
 
         # ---- PDF: exact poster size, print-emulated ----
+        pdf_scale = _pdf_content_scale(canvas, viewport)
+        if pdf_scale < 0.999999:
+            _eprint(
+                "[render_preview] fractional canvas rounding: PDF content "
+                f"scale={pdf_scale:.6f} to prevent a blank trailing page"
+            )
         page.pdf(
             path=str(pdf_path),
             width=f"{w_in}in",
             height=f"{h_in}in",
+            scale=pdf_scale,
             print_background=True,
             margin={"top": "0", "bottom": "0",
                     "left": "0", "right": "0"},

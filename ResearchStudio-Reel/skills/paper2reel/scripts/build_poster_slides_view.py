@@ -22,9 +22,11 @@ from typing import Any
 
 from reel_downloads import (
     ARCHIVE_META,
+    DOWNLOAD_ALL_PACKAGE_VERSION,
     DOWNLOAD_MANIFEST_PATH,
     archive_links,
     build_download_manifest,
+    selected_all_package_files,
     selected_files,
     validate_download_manifest,
     write_download_manifest,
@@ -1392,7 +1394,10 @@ def build_downloads(
         if source is not None and source.is_dir()
     }
     resolved_sources = set(available.values())
-    manifest_root = next(iter(resolved_sources)) if len(resolved_sources) == 1 else outdir.resolve()
+    if download_mode == "materialized" or len(resolved_sources) != 1:
+        manifest_root = outdir.resolve()
+    else:
+        manifest_root = next(iter(resolved_sources))
     download_manifest = build_download_manifest(
         bundle_root=manifest_root,
         poster_source=available.get("poster"),
@@ -1420,8 +1425,20 @@ def build_downloads(
     downloads_dir = outdir / DOWNLOADS_DIR
     downloads: list[dict[str, str]] = []
     if available:
-        all_files: list[tuple[Path, Path]]
-        if len(resolved_sources) == 1:
+        if (
+            download_manifest.get("all_package_version")
+            == DOWNLOAD_ALL_PACKAGE_VERSION
+        ):
+            all_files = [
+                (path, relative)
+                for path, relative, _source in selected_all_package_files(
+                    outdir,
+                    poster_source=available.get("poster"),
+                    video_source=available.get("video"),
+                    blog_source=available.get("blog"),
+                )
+            ]
+        elif len(resolved_sources) == 1:
             source = next(iter(resolved_sources))
             union: dict[str, tuple[Path, Path]] = {}
             for module in available:
@@ -1665,6 +1682,16 @@ def main() -> int:
         1,
     )
     (outdir / "reel.html").write_text(html, encoding="utf-8")
+
+    # Rebuild after the two Reel root files exist. The bootstrap publisher
+    # rebuilds once more after timeline media is copied into the final bundle.
+    build_downloads(
+        outdir=outdir,
+        poster_final_dir=download_poster_dir,
+        blog_final_dir=download_blog_dir,
+        video_final_dir=download_video_dir,
+        download_mode=args.download_mode,
+    )
 
     print(f"[paper2reel] wrote {outdir / 'reel.html'}")
     print(f"[paper2reel] wrote {outdir / 'content_alignment.json'}")

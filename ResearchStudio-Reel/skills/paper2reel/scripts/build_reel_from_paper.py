@@ -23,6 +23,7 @@ from typing import Any
 from reel_downloads import (
     DOWNLOAD_MANIFEST_PATH,
     build_download_manifest,
+    materialize_download_archives,
     validate_download_manifest,
     write_download_manifest,
 )
@@ -402,9 +403,10 @@ def sync_reel_into_bundle(
         copytree_replace(stage_assets / name, target_assets / name)
     target_downloads = target_assets / "downloads"
     if download_mode == "materialized":
+        # Preserve the three legacy module archives byte-for-byte. Only All
+        # depends on the final Reel runtime and is rebuilt below.
         copytree_replace(stage_assets / "downloads", target_downloads)
     elif target_downloads.exists():
-        # Reclaim historical ZIPs when publishing an on-demand Reel.
         shutil.rmtree(target_downloads)
 
     stage_slides = stage_assets / "slides"
@@ -419,31 +421,33 @@ def sync_reel_into_bundle(
     meta_dir = target_assets / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(staging_dir / "manifest.json", meta_dir / "reel_manifest.json")
+    download_manifest = build_download_manifest(
+        bundle_root=target_dir,
+        poster_source=target_dir,
+        video_source=target_dir,
+        blog_source=target_dir,
+        delivery=download_mode,
+    )
+    issues = validate_download_manifest(
+        download_manifest,
+        bundle_root=target_dir,
+        require_sources=True,
+    )
+    if issues:
+        first = issues[0]
+        raise SystemExit(
+            f"Cannot publish {download_mode} Reel downloads: "
+            f"{first['code']}: {first['message']}"
+        )
+    write_download_manifest(target_dir / DOWNLOAD_MANIFEST_PATH, download_manifest)
     if download_mode == "materialized":
-        shutil.copy2(
-            staging_dir / DOWNLOAD_MANIFEST_PATH,
-            target_dir / DOWNLOAD_MANIFEST_PATH,
-        )
-    else:
-        download_manifest = build_download_manifest(
-            bundle_root=target_dir,
-            poster_source=target_dir,
-            video_source=target_dir,
-            blog_source=target_dir,
-            delivery="on_demand",
-        )
-        issues = validate_download_manifest(
+        materialize_download_archives(
             download_manifest,
             bundle_root=target_dir,
-            require_sources=True,
+            downloads_dir=target_downloads,
+            kinds=("all",),
+            clear_destination=False,
         )
-        if issues:
-            first = issues[0]
-            raise SystemExit(
-                "Cannot publish on-demand Reel downloads: "
-                f"{first['code']}: {first['message']}"
-            )
-        write_download_manifest(target_dir / DOWNLOAD_MANIFEST_PATH, download_manifest)
 
     manifest_path = target_dir / "manifest.json"
     manifest = load_json(manifest_path, {})

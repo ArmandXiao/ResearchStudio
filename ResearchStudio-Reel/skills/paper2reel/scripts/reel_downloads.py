@@ -9,12 +9,15 @@ the final-package checker use this module so path validation cannot drift.
 from __future__ import annotations
 
 import json
+import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
 DOWNLOAD_SCHEMA_VERSION = "paper2reel.downloads.v1"
+DOWNLOAD_ALL_PACKAGE_VERSION = "paper2reel.all.v2"
 DOWNLOAD_MANIFEST_PATH = Path("assets/meta/reel_downloads.json")
 DOWNLOAD_DELIVERIES = {"materialized", "on_demand"}
 ARCHIVE_ORDER = ("all", "poster", "video", "blog")
@@ -43,6 +46,41 @@ MODULE_FILES: dict[str, dict[str, set[str]]] = {
         "files": {"blog_en.docx", "blog_zh.docx"},
         "directories": set(),
     },
+}
+ALL_PACKAGE_ROOT_FILES = {
+    "reel.html",
+    "content_alignment.json",
+    "poster.pdf",
+    "poster.pptx",
+    "video.mp4",
+    "video.pptx",
+    "blog_en.docx",
+    "blog_zh.docx",
+}
+ALL_PACKAGE_REQUIRED_FILES = set(ALL_PACKAGE_ROOT_FILES)
+ALL_PACKAGE_RUNTIME_DIRECTORIES = {
+    "assets/poster",
+    "assets/media",
+    "assets/slides",
+    "assets/blog",
+    "assets/ui",
+    "assets/fonts",
+}
+ALL_PACKAGE_EXCLUDED_PARTS = {
+    "_pptx_build",
+    "build",
+    "cache",
+    "caches",
+    "meta",
+    "previews",
+    "reports",
+    "temp",
+    "tmp",
+}
+ALL_PACKAGE_MODULE_FILES = {
+    "poster": {"poster.pdf", "poster.pptx"},
+    "video": {"video.mp4", "video.pptx"},
+    "blog": {"blog_en.docx", "blog_zh.docx"},
 }
 PROHIBITED_PARTS = {
     ".claude",
@@ -108,6 +146,26 @@ def matches_module(relative: Path | PurePosixPath, module: str) -> bool:
     )
 
 
+def matches_all_package(relative: Path | PurePosixPath) -> bool:
+    """Return whether a path belongs in the self-contained Download All ZIP."""
+    relative_posix = relative.as_posix()
+    if not is_safe_relative_posix(relative_posix):
+        return False
+    if relative.suffix.lower() == ".zip":
+        return False
+    lowered_parts = tuple(part.lower() for part in relative.parts)
+    if any(part.startswith(".") for part in lowered_parts):
+        return False
+    if set(lowered_parts) & ALL_PACKAGE_EXCLUDED_PARTS:
+        return False
+    if len(relative.parts) == 1:
+        return relative_posix in ALL_PACKAGE_ROOT_FILES
+    return any(
+        relative_posix.startswith(f"{directory}/")
+        for directory in ALL_PACKAGE_RUNTIME_DIRECTORIES
+    )
+
+
 def selected_files(
     source: Path,
     *,
@@ -128,6 +186,58 @@ def selected_files(
             continue
         selected.append((path, relative))
     return selected
+
+
+def selected_all_package_files(
+    bundle_root: Path,
+    *,
+    poster_source: Path | None,
+    video_source: Path | None,
+    blog_source: Path | None,
+) -> list[tuple[Path, Path, Path]]:
+    """Select one offline Reel plus the final user-facing module outputs.
+
+    Runtime files always come from ``bundle_root``. Final Poster, Video, and
+    Blog deliverables may come from separate source directories while a
+    materialized Reel is being staged. Archive names stay rooted at the Reel
+    package, and collisions prefer the already-published bundle copy.
+    """
+    bundle_root = bundle_root.resolve()
+    selected: dict[str, tuple[Path, Path, Path]] = {}
+
+    if bundle_root.is_dir():
+        for path in sorted(bundle_root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(bundle_root)
+            if matches_all_package(relative):
+                selected.setdefault(
+                    relative.as_posix().casefold(),
+                    (path, relative, bundle_root),
+                )
+
+    sources = {
+        "poster": poster_source,
+        "video": video_source,
+        "blog": blog_source,
+    }
+    for module in ("poster", "video", "blog"):
+        raw_source = sources[module]
+        if raw_source is None:
+            continue
+        source = Path(raw_source).resolve()
+        if not source.is_dir():
+            continue
+        for name in sorted(ALL_PACKAGE_MODULE_FILES[module]):
+            path = source / name
+            relative = Path(name)
+            if path.is_file():
+                selected.setdefault(
+                    relative.as_posix().casefold(),
+                    (path, relative, source),
+                )
+
+    return [selected[key] for key in sorted(selected)]
 
 
 def _bundle_path(path: Path, source: Path, bundle_root: Path, *, strict: bool) -> str:
@@ -201,7 +311,24 @@ def build_download_manifest(
         ]
 
     all_entries: dict[str, dict[str, Any]] = {}
-    if len(set(sources.values())) <= 1:
+    all_package_files = selected_all_package_files(
+        bundle_root,
+        poster_source=sources.get("poster"),
+        video_source=sources.get("video"),
+        blog_source=sources.get("blog"),
+    )
+    has_reel_runtime = {
+        relative.as_posix()
+        for _path, relative, _source in all_package_files
+    }.issuperset({"reel.html", "content_alignment.json"})
+    if has_reel_runtime:
+        for path, relative, source in all_package_files:
+            item = _entry(path, relative, source, bundle_root, strict=strict)
+            all_entries.setdefault(str(item["arcname"]), item)
+    elif len(set(sources.values())) <= 1:
+        # A temporary viewer staging directory may be created before reel.html
+        # exists. Preserve the historical union format until the final bundle
+        # is published and the manifest can be rebuilt as an offline Reel.
         for module in ("poster", "video", "blog"):
             for item in module_entries[module]:
                 all_entries.setdefault(str(item["arcname"]), dict(item))
@@ -225,12 +352,15 @@ def build_download_manifest(
             **ARCHIVE_META[kind],
             "files": entries_by_archive[kind],
         }
-    return {
+    payload = {
         "schema_version": DOWNLOAD_SCHEMA_VERSION,
         "delivery": delivery,
         "created_at": utc_now(),
         "archives": archives,
     }
+    if has_reel_runtime:
+        payload["all_package_version"] = DOWNLOAD_ALL_PACKAGE_VERSION
+    return payload
 
 
 def write_download_manifest(path: Path, payload: dict[str, Any]) -> None:
@@ -273,6 +403,16 @@ def validate_download_manifest(
                 "DOWNLOAD_MANIFEST_SCHEMA_INVALID",
                 f"schema_version must be {DOWNLOAD_SCHEMA_VERSION}.",
                 data={"actual": payload.get("schema_version")},
+            )
+        )
+    all_package_version = payload.get("all_package_version")
+    if all_package_version not in {None, DOWNLOAD_ALL_PACKAGE_VERSION}:
+        issues.append(
+            _issue(
+                "DOWNLOAD_ALL_PACKAGE_VERSION_INVALID",
+                f"all_package_version must be {DOWNLOAD_ALL_PACKAGE_VERSION} when present.",
+                path="all_package_version",
+                data={"actual": all_package_version},
             )
         )
     delivery = payload.get("delivery")
@@ -416,6 +556,18 @@ def validate_download_manifest(
                             data={"archive": kind, "path": source_path, "arcname": arcname},
                         )
                     )
+            if kind == "all" and all_package_version == DOWNLOAD_ALL_PACKAGE_VERSION:
+                if not matches_all_package(PurePosixPath(source_path)) or not matches_all_package(
+                    PurePosixPath(arcname)
+                ):
+                    issues.append(
+                        _issue(
+                            "DOWNLOAD_ALL_FILE_CLASSIFICATION_INVALID",
+                            "Download All may contain only the offline Reel runtime and final module deliverables.",
+                            path=item_path,
+                            data={"path": source_path, "arcname": arcname},
+                        )
+                    )
 
             if require_sources:
                 candidate = bundle_root / source_path
@@ -456,24 +608,124 @@ def validate_download_manifest(
             valid_entries.append((source_path, arcname, size))
         normalized[kind] = valid_entries
 
-    if delivery == "on_demand" and all(kind in normalized for kind in ARCHIVE_ORDER):
-        expected_all: dict[str, tuple[str, str, int]] = {}
-        for kind in ("poster", "video", "blog"):
-            for entry in normalized[kind]:
-                expected_all.setdefault(entry[1].casefold(), entry)
+    if all(kind in normalized for kind in ARCHIVE_ORDER):
         actual_all = {
             entry[1].casefold(): entry
             for entry in normalized["all"]
         }
-        if actual_all != expected_all:
-            issues.append(
-                _issue(
-                    "DOWNLOAD_ALL_UNION_INVALID",
-                    "The All archive must be the deduplicated union of Poster, Video, and Blog.",
-                    path="archives.all.files",
-                )
+        if all_package_version is None:
+            if delivery == "on_demand":
+                expected_all: dict[str, tuple[str, str, int]] = {}
+                for kind in ("poster", "video", "blog"):
+                    for entry in normalized[kind]:
+                        expected_all.setdefault(entry[1].casefold(), entry)
+                if actual_all != expected_all:
+                    issues.append(
+                        _issue(
+                            "DOWNLOAD_ALL_UNION_INVALID",
+                            "A historical All archive must be the deduplicated union of Poster, Video, and Blog.",
+                            path="archives.all.files",
+                        )
+                    )
+        elif all_package_version == DOWNLOAD_ALL_PACKAGE_VERSION:
+            missing = sorted(
+                name
+                for name in ALL_PACKAGE_REQUIRED_FILES
+                if name.casefold() not in actual_all
             )
+            if missing:
+                issues.append(
+                    _issue(
+                        "DOWNLOAD_ALL_REQUIRED_FILE_MISSING",
+                        "The self-contained Download All package is missing required Reel or module deliverables.",
+                        path="archives.all.files",
+                        data={"files": missing},
+                    )
+                )
+            if require_sources:
+                expected_all: dict[str, tuple[str, str, int]] = {}
+                for path, relative, source in selected_all_package_files(
+                    bundle_root,
+                    poster_source=bundle_root,
+                    video_source=bundle_root,
+                    blog_source=bundle_root,
+                ):
+                    item = _entry(
+                        path,
+                        relative,
+                        source,
+                        bundle_root,
+                        strict=True,
+                    )
+                    entry = (
+                        str(item["path"]),
+                        str(item["arcname"]),
+                        int(item["size"]),
+                    )
+                    expected_all.setdefault(entry[1].casefold(), entry)
+                if actual_all != expected_all:
+                    issues.append(
+                        _issue(
+                            "DOWNLOAD_ALL_PACKAGE_INVALID",
+                            "Download All must exactly match the self-contained Reel package selected from the final bundle.",
+                            path="archives.all.files",
+                        )
+                    )
     return issues
+
+
+def materialize_download_archives(
+    payload: dict[str, Any],
+    *,
+    bundle_root: Path,
+    downloads_dir: Path | None = None,
+    kinds: Iterable[str] = ARCHIVE_ORDER,
+    clear_destination: bool = True,
+) -> dict[str, Path]:
+    """Write selected manifest archives for standalone/materialized delivery."""
+    bundle_root = bundle_root.resolve()
+    if payload.get("delivery") != "materialized":
+        raise ValueError("materialized archives require delivery=materialized")
+    issues = validate_download_manifest(
+        payload,
+        bundle_root=bundle_root,
+        require_sources=True,
+    )
+    if issues:
+        first = issues[0]
+        raise ValueError(f"{first['code']}: {first['message']}")
+
+    selected_kinds = tuple(kinds)
+    unknown_kinds = sorted(set(selected_kinds) - set(ARCHIVE_ORDER))
+    if unknown_kinds:
+        raise ValueError(f"unknown download archives: {', '.join(unknown_kinds)}")
+
+    destination = (
+        Path(downloads_dir).resolve()
+        if downloads_dir is not None
+        else bundle_root / "assets" / "downloads"
+    )
+    if clear_destination and destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    written: dict[str, Path] = {}
+    for kind in selected_kinds:
+        archive_spec = payload["archives"][kind]
+        archive_path = destination / str(archive_spec["filename"])
+        with zipfile.ZipFile(
+            archive_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            allowZip64=True,
+        ) as archive:
+            for item in archive_spec["files"]:
+                archive.write(
+                    bundle_root / str(item["path"]),
+                    str(item["arcname"]),
+                )
+        written[kind] = archive_path
+    return written
 
 
 def read_download_manifest(bundle_root: Path) -> dict[str, Any]:

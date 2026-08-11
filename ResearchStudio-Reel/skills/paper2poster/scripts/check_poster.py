@@ -13,7 +13,8 @@ Four subcommands:
                  FULL -- the hard staged-fill exit gate.
   preflight      Static HTML scan: LaTeX residue, raw '<' inside
                  ``$…$`` / ``$$…$$`` / ``\\(…\\)`` / ``\\[…\\]``,
-                 missing local images, missing data-measure-role.
+                 missing local images, missing data-measure-role, and
+                 semantic Motivation/Method/Result figure attribution.
   polish         Visual-polish warnings on figure sizing, broken
                  images, typography orphans, and space-between fill.
                  Soft gate; warns by default. ``--strict`` to fail.
@@ -147,7 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     # --- preflight ------------------------------------------------------
     pp = sub.add_parser(
         "preflight",
-        help="static HTML lint (LaTeX residue, math, images, roles)",
+        help=(
+            "static HTML lint (LaTeX residue, math, images, roles, "
+            "semantic figure attribution)"
+        ),
     )
     pp.add_argument("html", help="path to poster.html")
     pp.set_defaults(func=_preflight.cmd_preflight)

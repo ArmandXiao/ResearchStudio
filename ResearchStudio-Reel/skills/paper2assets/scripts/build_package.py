@@ -2,11 +2,9 @@
 """Build the cross-skill canonical package for a paper2assets `<outdir>`.
 
 paper2assets is the single source of truth for ALL paper-rendering skills
-downstream — not just paper2poster. Skills like paper2blog, paper2video, and
-paper2reel consume the same `<outdir>/` and rely on three additional
-canonical files that paper2poster doesn't need but they do. This script
-produces those three files so a single paper2assets run hands everything
-downstream needs.
+downstream.  Paper2Poster consumes the enriched figure contract, while
+paper2blog, paper2video, and paper2reel also consume the shared sections and
+narration documents.  This script refreshes those canonical files together.
 
 What this script adds on top of what paper2assets already produces (text.txt /
 captions.json / figures.json / metadata.json / paper_spec.md / figures/):
@@ -18,8 +16,8 @@ captions.json / figures.json / metadata.json / paper_spec.md / figures/):
   sections.json   — paper_spec.md parsed into structured per-section JSON
                     with stable ids (`problem`, `motivation`, `method`,
                     `key-result`, ...), each section's `necessary` /
-                    `additional` / `audio_script` fields, and an empty
-                    `figures: []` (downstream joins with figures.json by id).
+                    `additional` / `audio_script` fields, and conservative
+                    semantic figure references joined by stable figure ids.
 
   narration.json  — TTS clip list extracted from `**Audio script:**` markers
                     in document order. The title clip comes from the YAML
@@ -34,8 +32,9 @@ Use (from paper2assets SKILL.md Step 7, after Step 2 extraction is done):
       --skip-extract \\
       --paper-spec <outdir>/paper_spec.md
 
-The script is intentionally idempotent — re-running over an existing outdir
-overwrites the 3 JSON outputs without touching extracted text/figures/spec.
+The script is intentionally idempotent.  It atomically refreshes semantic
+metadata and downstream JSON documents without touching figure rasters or the
+paper spec, and fails closed when canonical figure/caption JSON is corrupt.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -55,13 +55,20 @@ _THIS_DIR = str(Path(__file__).resolve().parent)
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 from utils import layout  # noqa: E402
+from figure_semantics import annotate_documents  # noqa: E402
 
 
 # Schema strings written into the 3 JSON outputs. Downstream consumers
 # may key on these to detect format changes — bump cautiously.
 SCHEMA_VERSION = "paper2assets.v1"
-SECTIONS_SCHEMA_VERSION = "paper_sections.v1"
+SECTIONS_SCHEMA_VERSION = "paper_sections.v2"
 NARRATION_SCHEMA_VERSION = "paper_narration.v1"
+SEMANTIC_COMMIT_FIELDS = (
+    "file", "page", "caption", "caption_provenance", "figure_id",
+    "semantic_schema_version", "semantic_eligible", "semantic_status",
+    "semantic_role", "semantic_confidence", "semantic_roles",
+    "section_exclusions", "section_relevance",
+)
 
 FIELD_RE = re.compile(
     r"^\s*\*\*(?P<name>Necessary|Additional|Audio script):\*\*\s*(?P<value>.*)\s*$",
@@ -103,8 +110,91 @@ def load_json(path: Path, default: Any) -> Any:
         return default
 
 
+def load_required_json(
+    path: Path, expected: type | tuple[type, ...], *, label: str,
+) -> Any:
+    """Load a canonical input without ever degrading corruption to emptiness."""
+    if not path.is_file():
+        sys.exit(f"Required {label} not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"Cannot read required {label} {path}: {exc}")
+    if not isinstance(payload, expected):
+        names = (
+            ", ".join(item.__name__ for item in expected)
+            if isinstance(expected, tuple) else expected.__name__
+        )
+        sys.exit(f"Invalid {label} shape in {path}: expected {names}")
+    return payload
+
+
 def write_json(path: Path, obj: Any) -> None:
-    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
+    """Atomically replace JSON so an interrupted refresh keeps the old file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(obj, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def json_payload_bytes(obj: Any) -> bytes:
+    return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def figure_semantics_generation(figures: list[dict[str, Any]]) -> str:
+    projection = [
+        {key: figure.get(key) for key in SEMANTIC_COMMIT_FIELDS}
+        for figure in figures
+    ]
+    encoded = json.dumps(
+        projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_narration_document(document: dict[str, Any]) -> None:
+    """Reject partial canonical narration documents on refresh-only runs."""
+    required = {
+        "schema_version": str,
+        "created_at": str,
+        "provider": str,
+        "sections": list,
+    }
+    missing = sorted(set(required).difference(document))
+    if missing:
+        raise ValueError(
+            "narration.json is missing required field(s): " + ", ".join(missing)
+        )
+    for key, expected in required.items():
+        if not isinstance(document[key], expected):
+            raise ValueError(
+                f"narration.json field {key!r} must be {expected.__name__}"
+            )
+    if "voice" not in document or not isinstance(document["voice"], (str, type(None))):
+        raise ValueError("narration.json field 'voice' must be a string or null")
+    if document["schema_version"] != NARRATION_SCHEMA_VERSION:
+        raise ValueError("narration.json has an unsupported schema_version")
+    seen_ids: set[str] = set()
+    for item in document["sections"]:
+        if not isinstance(item, dict):
+            raise ValueError("narration.json sections entries must be objects")
+        for key in ("id", "heading", "text"):
+            if not isinstance(item.get(key), str):
+                raise ValueError(
+                    f"narration.json section field {key!r} must be a string"
+                )
+        item_id = item["id"].strip()
+        if not item_id or item_id in seen_ids:
+            raise ValueError(
+                "narration.json section ids must be non-empty and unique"
+            )
+        seen_ids.add(item_id)
 
 
 def normalize_section_id(heading: str) -> str:
@@ -349,6 +439,11 @@ def build_manifest(
     extractor_cmd: list[str] | None,
     paper_spec: Path | None,
     skipped_extract: bool,
+    captions: list[Any] | dict[str, Any],
+    figures: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    sections: dict[str, Any],
+    narration: dict[str, Any],
 ) -> dict[str, Any]:
     previous_manifest = load_json(layout.manifest_path(outdir), {})
     previous_extractor = (
@@ -357,9 +452,10 @@ def build_manifest(
         else {}
     )
     text_path = layout.meta_file(outdir, "text")
-    captions = load_json(layout.meta_file(outdir, "captions"), {})
-    figures = load_json(layout.meta_file(outdir, "figures"), [])
-    metadata = load_json(layout.meta_file(outdir, "metadata"), {})
+    previous_files = (
+        previous_manifest.get("files", {})
+        if isinstance(previous_manifest, dict) else {}
+    )
     source = {
         "pdf": pdf.as_posix(),
         "filename": pdf.name,
@@ -380,11 +476,45 @@ def build_manifest(
     }
     if paper_spec is not None:
         files["paper_spec"] = rel_to(paper_spec, outdir)
+    elif isinstance(previous_files, dict) and previous_files.get("paper_spec"):
+        files["paper_spec"] = previous_files["paper_spec"]
+    elif sections.get("source_spec"):
+        files["paper_spec"] = str(sections["source_spec"])
+
+    semantic_generation = figure_semantics_generation(figures)
+    artifacts = {
+        # Figure dimensions may legitimately change during Paper2Poster's
+        # optional crop pass.  Commit the immutable selection inputs here,
+        # while sections/narration commit their complete normalized JSON.
+        "figures": {
+            "path": files["figures"],
+            "sha256": semantic_generation,
+            "hash_scope": "semantic-selection-fields",
+        },
+        "sections": {
+            "path": files["sections"],
+            "sha256": hashlib.sha256(json_payload_bytes(sections)).hexdigest(),
+            "hash_scope": "normalized-json",
+        },
+        "narration": {
+            "path": files["narration"],
+            "sha256": hashlib.sha256(json_payload_bytes(narration)).hexdigest(),
+            "hash_scope": "normalized-json",
+        },
+    }
+    package_generation = hashlib.sha256(
+        "\n".join(
+            f"{name}:{item['sha256']}" for name, item in sorted(artifacts.items())
+        ).encode("utf-8")
+    ).hexdigest()
 
     return {
         "schema_version": SCHEMA_VERSION,
         "layout": layout.LAYOUT_VERSION,
         "created_at": utc_now(),
+        "package_generation": package_generation,
+        "figure_semantics_generation": semantic_generation,
+        "artifacts": artifacts,
         "source": source,
         "extractor": {
             "script": rel_to(extractor, repo_root()),
@@ -396,8 +526,8 @@ def build_manifest(
         "files": files,
         "counts": {
             "text_chars": len(text_path.read_text(errors="replace")) if text_path.exists() else 0,
-            "captions": len(captions) if isinstance(captions, dict) else 0,
-            "figures": len(figures) if isinstance(figures, list) else 0,
+            "captions": len(captions),
+            "figures": len(figures),
             "metadata_populated_fields": len([k for k, v in metadata.items() if v])
             if isinstance(metadata, dict)
             else 0,
@@ -452,8 +582,40 @@ def main() -> None:
     else:
         print(f"[paper2assets/package] skip extract; refreshing package metadata in {outdir}")
 
-    sections_doc = build_sections_json(paper_spec, outdir)
-    narration_doc = build_narration_json(sections_doc)
+    preserve_existing_documents = args.skip_extract and paper_spec is None
+    if preserve_existing_documents:
+        sections_doc = load_required_json(
+            layout.meta_file(outdir, "sections"), dict, label="sections.json",
+        )
+        sections_doc["schema_version"] = SECTIONS_SCHEMA_VERSION
+    else:
+        sections_doc = build_sections_json(paper_spec, outdir)
+    figures_path = layout.meta_file(outdir, "figures", create_parent=True)
+    captions_path = layout.meta_file(outdir, "captions", create_parent=True)
+    captions_doc = load_required_json(
+        captions_path, (list, dict), label="captions.json",
+    )
+    try:
+        figures_doc, sections_doc = annotate_documents(
+            load_required_json(figures_path, list, label="figures.json"),
+            captions_doc,
+            sections_doc,
+        )
+    except ValueError as exc:
+        sys.exit(f"Cannot enrich figure semantics: {exc}")
+    if preserve_existing_documents:
+        narration_doc = load_required_json(
+            layout.meta_file(outdir, "narration"), dict, label="narration.json",
+        )
+        try:
+            validate_narration_document(narration_doc)
+        except ValueError as exc:
+            sys.exit(f"Cannot preserve canonical narration: {exc}")
+    else:
+        narration_doc = build_narration_json(sections_doc)
+    metadata_doc = load_required_json(
+        layout.meta_file(outdir, "metadata"), dict, label="metadata.json",
+    )
     manifest = build_manifest(
         pdf=pdf,
         outdir=outdir,
@@ -461,14 +623,27 @@ def main() -> None:
         extractor_cmd=extractor_cmd,
         paper_spec=paper_spec,
         skipped_extract=args.skip_extract,
+        captions=captions_doc,
+        figures=figures_doc,
+        metadata=metadata_doc,
+        sections=sections_doc,
+        narration=narration_doc,
     )
 
     layout.meta_dir(outdir, create=True)
+    write_json(figures_path, figures_doc)
     write_json(layout.meta_file(outdir, "sections"), sections_doc)
     write_json(layout.meta_file(outdir, "narration"), narration_doc)
     write_json(layout.manifest_path(outdir), manifest)
 
     print("[paper2assets/package] wrote manifest.json")
+    classified = sum(
+        1 for figure in figures_doc if figure.get("semantic_status") == "classified"
+    )
+    print(
+        f"[paper2assets/package] enriched figures.json "
+        f"({classified}/{len(figures_doc)} classified)"
+    )
     print(f"[paper2assets/package] wrote sections.json ({len(sections_doc.get('sections', []))} sections)")
     print(f"[paper2assets/package] wrote narration.json ({len(narration_doc.get('sections', []))} clips)")
 

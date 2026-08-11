@@ -1,6 +1,6 @@
 ---
 name: paper2poster
-description: Render a pre-extracted paper's structured 9-section spec (`paper_spec.md`) into a single-page HTML academic poster, fit the layout to the page via an iterative measured-fill loop, and export it to print-ready PDF + PNG thumbnail. Requires the upstream `paper2assets` skill to have produced the input `<outdir>/` package (`manifest.json` at the root + an `assets/` folder holding `meta/paper_spec.md`, `meta/text.txt`, `meta/figures.json`, `meta/metadata.json`, `figures/*.png`, `logos/`, `qr/`) first. Use when the user wants an HTML poster, PDF/PNG export, or PPTX from a paper they already have extracted assets for — e.g., "render the poster", "make the poster from this spec", "export poster to PDF", "paper2poster". The three skills paper2assets → paper2poster → html2pptx run in sequence, each invokable on its own.
+description: Render a pre-extracted paper's structured 9-section spec (`paper_spec.md`) into a single-page HTML academic poster, fit the layout to the page via an iterative measured-fill loop, and export it to print-ready PDF + PNG thumbnail. Requires the upstream `paper2assets` skill to have produced the input `<outdir>/` package (`manifest.json` at the root + an `assets/` folder holding `meta/paper_spec.md`, `meta/text.txt`, `meta/figures.json`, `meta/metadata.json`, zero or more `figures/*.png`, `logos/`, `qr/`) first. Use when the user wants an HTML poster, PDF/PNG export, or PPTX from a paper they already have extracted assets for, for example "render the poster", "make the poster from this spec", "export poster to PDF", or "paper2poster". The three skills paper2assets → paper2poster → html2pptx run in sequence, each invokable on its own.
 allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, AskUserQuestion, WebFetch, WebSearch
 ---
 
@@ -13,7 +13,9 @@ This skill is the **rendering stage** of a 3-skill pipeline. It assumes `paper2a
      manifest.json   assets/figures/   assets/logos/   assets/qr/   assets/meta/{paper_spec.md, text.txt, figures.json, metadata.json}
      │
      ▼  Step 1 — verify prerequisites
-     ▼  Step 2 — pick figures (Method / optional Motivation / optional Secondary)
+     ▼  Step 2: select figures from upstream semantics
+     │         → assets/meta/figure_selection.json
+     │           (Method / high-confidence optional Motivation / Result)
      ▼  Step 2.5 — optional per-figure visual box cut (asymmetric noise the
      │             paper2assets deterministic chain couldn't catch — most
      │             figures need no further work here)
@@ -106,18 +108,27 @@ already exist**:
 if [[ -f "$outdir/poster.html" \
       && -f "$outdir/poster.pdf" \
       && -f "$outdir/poster.png" ]]; then
-  echo "[paper2poster] CACHED in $outdir — poster from prior run, reusing."
-  echo "  poster.html  $(stat -c%s "$outdir/poster.html") bytes"
-  echo "  poster.pdf   $(stat -c%s "$outdir/poster.pdf") bytes"
-  echo "  poster.png   $(stat -c%s "$outdir/poster.png") bytes"
-  # Report any extras
-  [[ -f "$outdir/poster.pptx" ]] && echo "  poster.pptx  (html2pptx output present)"
-  [[ -d "$outdir/assets/audio" ]] && echo "  assets/audio/       (narration present)"
-  exit 0
+  if python ~/.claude/skills/paper2poster/scripts/select_figures.py "$outdir" \
+      && python ~/.claude/skills/paper2poster/scripts/check_poster.py \
+          preflight "$outdir/poster.html"; then
+    echo "[paper2poster] CACHED in $outdir: semantic preflight passed, reusing."
+    echo "  poster.html  $(stat -c%s "$outdir/poster.html") bytes"
+    echo "  poster.pdf   $(stat -c%s "$outdir/poster.pdf") bytes"
+    echo "  poster.png   $(stat -c%s "$outdir/poster.png") bytes"
+    [[ -f "$outdir/poster.pptx" ]] && echo "  poster.pptx  (html2pptx output present)"
+    [[ -d "$outdir/assets/audio" ]] && echo "  assets/audio/       (narration present)"
+    exit 0
+  fi
+  echo "[paper2poster] cached deliverables are semantically stale; upgrading " \
+       "Paper2Assets and rebuilding instead of reusing them."
 fi
 ```
 
-If all three core deliverables are present, REPORT and STOP.
+If all three core deliverables are present, REPORT and STOP only when the
+selector and semantic preflight both pass. A legacy, partial, mixed-generation,
+or wrongly attributed cached poster must continue through Step 1, upgrade its
+Paper2Assets package, and be rendered again. Cached PDF/PNG existence alone is
+never proof that the Motivation image is correct.
 
 Re-render ONLY when:
 - one of `poster.{html,pdf,png}` is missing → resume from the
@@ -133,10 +144,12 @@ Required argument: an `<outdir>/` path produced by the `paper2assets` skill, or 
 
 ```bash
 ls <outdir>/assets/meta/paper_spec.md <outdir>/assets/meta/text.txt <outdir>/assets/meta/figures.json <outdir>/assets/meta/metadata.json
-ls <outdir>/assets/figures/*.png
 ```
 
-If any of the five required files is missing, automatically invoke the `paper2assets` skill on the source PDF to produce/populate the `<outdir>/`, then continue.
+If any of the four required files is missing, automatically invoke the
+`paper2assets` skill on the source PDF to produce/populate the `<outdir>/`, then
+continue. `figures.json` may legitimately be an empty list; the selector and
+preflight validate every non-empty record and its on-disk asset.
 
 **Optional files `<outdir>/assets/logos/` and `<outdir>/assets/qr/` may be absent** — but **DO NOT silently delete the logo/QR HTML blocks** just because the directory is missing. Two common reasons the directory is missing are recoverable:
 
@@ -166,14 +179,55 @@ Only AFTER the retry, if logos/ is still empty (institute names didn't resolve t
 
 ### Step 2 — Pick figures
 
-Read `figures.json` + `captions.json` + `paper_spec.md`. Pick:
+Run the deterministic semantic selector before composing or substituting the
+poster:
 
-- **Method figure** — the figure that visualizes the paper's proposed approach. Usually labeled "Figure 1" or "Figure 2" and described in the Method section's caption ("our pipeline", "overview", "architecture"). Record its `width`, `height`, and `layout` from `figures.json`.
-- **Motivation figure (optional)** — a figure that motivates the problem (a "failure mode" plot, a side-by-side comparison with prior art, a teaser). Pick only when one of the early figures clearly carries motivational signal. **Disjoint from Method.** Always rendered as `{column=half}` — full-width motivation figures are not supported.
-- **Secondary figure (optional but encouraged)** — a Key Result plot, ablation chart, or qualitative samples figure. **Disjoint from Method + Motivation.** **Target ≥2 figures per poster** — Method alone leaves the empirical side as a prose-and-numbers wall.
+```bash
+python scripts/select_figures.py <outdir>
+```
+
+It writes `<outdir>/assets/meta/figure_selection.json`. Treat that manifest as
+the single source of truth for the primary figure placeholders:
+
+- `selections.method.file` -> `{{METHOD_FIGURE}}`
+- `selections.motivation.file` -> `{{TEASER_FIGURE}}` when non-null
+- `selections.result.file` -> `{{SECONDARY_FIGURE}}` or the primary figure in
+  the Key Result section
+
+Each non-null entry also carries the stable `figure_id`, caption, semantic
+confidence, and evidence. Do not replace a selected
+file with a different image based on visual guesswork. `check_poster.py
+preflight` independently recomputes the deterministic selection and hard-fails
+a stale manifest, a role mismatch, or Method/Motivation reuse.
+
+The selector consumes the additive Paper2Assets semantic fields
+`semantic_roles[]` and `section_relevance[]`. Selection is deterministic and
+disjoint:
+
+- **Method figure** requires `method >= 0.55` and rejects empirically dominant
+  or near-tied Result/Ablation/Qualitative galleries. This prevents captions
+  that happen to say "our method" from displacing the actual system overview.
+- **Motivation figure is optional and high-confidence only.** It requires
+  `motivation >= 0.62`, rejects every candidate carrying `method`, `result`, or
+  `ablation >= 0.55`, and is always disjoint from Method. If it is null, remove
+  the entire Motivation `<figure>` block. Never fill that space with a Method
+  or Result image.
+- **Result figure** requires `result` or `qualitative >= 0.55`, rejects clearly
+  Method-dominant diagrams, and is disjoint from Method and Motivation.
+  **Target >=2 figures per poster** only when an
+  eligible empirical figure exists. Do not pad a poster with a semantically
+  unrelated image to reach the target.
 - **Figure-rich mode → 3-column layout.** If the paper carries **more than 3 high-signal figures** (multiple result plots, a qualitative-samples gallery, architecture + component diagrams), select them all (soft cap ~6) instead of stopping at 2 — and render with the **3-column layout** (`--layout 3col`, Step 3) whose wider columns hold bigger figures, the way most author-GT posters do. Distribute the figures across all three columns; the Method figure stays the anchor. Pick only genuinely informative figures — never pad to hit a count.
 
-Cite each picked figure with its file path: `assets/figures/<page>_figure<n>.png`. Verify the file exists on disk before relying on it.
+**Legacy bundles must be upgraded.** When `figures.json` has no complete
+`figure_semantics.v2` producer contract, including partial/prototype semantic
+fields, the selector exits non-zero and preflight fails. Reuse the existing
+assets and run Paper2Assets `build_package.py --skip-extract --paper-spec ...`,
+then rerun the selector. Manual/raw-model figure selection is not an allowed
+fallback because it recreates the Motivation mismatch this gate prevents.
+
+Cite each selected figure with its file path and verify it exists before
+relying on it.
 
 ### Step 2.5 — Per-figure visual box cut (optional, for asymmetric noise the deterministic chain couldn't catch)
 
@@ -367,7 +421,14 @@ python ~/.claude/skills/paper2poster/scripts/check_poster.py slack \
 
 **Read `references/staged_fill.md` now** — it carries the `check_poster.py slack` command, the JSON report shape, the measure→select→apply→review loop, the flat catalog of modification methods, and the shave-back order.
 
-Run preflight first (`check_poster.py preflight`) to catch LaTeX residue / raw `<` in math / missing images before measuring.
+Run preflight first (`check_poster.py preflight`) to catch LaTeX residue / raw
+`<` in math / missing images before measuring. For semantic Paper2Assets
+bundles this is also the mandatory figure attribution gate: it fails when the
+Motivation, Method, or Result image disagrees with
+`assets/meta/figure_selection.json`, when Motivation is below confidence or
+has a Method/Result/Ablation veto role, or when Method and Motivation reuse one
+figure. Legacy or partial bundles fail until Paper2Assets upgrades their
+semantic metadata.
 
 **Debug aid.** When the fill loop misbehaves — slackRatio says one thing, your eyes see another — write `check_poster.py slack --json-out <outdir>/assets/meta/poster_debug.json` output, open `poster.html` in a browser, and press `d`. Every column/section/figure gets outlined; badges show actual rendered height alongside the estimator's prediction and the delta.
 
@@ -480,6 +541,7 @@ The full chain is `paper2assets` → `paper2poster` (which now ends by producing
 ```
 scripts/
 ├── check_poster.py      ← CLI: slack / preflight / polish / verify-final / deliverables
+├── select_figures.py    ← figures.json semantics → deterministic figure_selection.json
 ├── render_poster.py     ← CLI: print-emulated PDF + scaled PNG thumbnail (mirrors bundled fonts)
 ├── generate_audio.py    ← CLI: narration.json → assets/audio/<id>.mp3 (free Edge TTS default; --provider azure)
 └── utils/               ← internal modules (canvas parser, Playwright + settle, etc.)

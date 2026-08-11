@@ -27,7 +27,7 @@ my_paper/
         ├── paper_spec.md          # 9-section structured summary + audio scripts
         ├── metadata.json          # title, authors, institutes, venue, paper / code URLs
         ├── text.txt               # full PDF text — authoritative source for any cited number
-        ├── figures.json           # per-figure manifest (file, size, page, source-column layout)
+        ├── figures.json           # physical manifest + stable ids, semantic roles, section relevance
         ├── captions.json          # detected "Figure N: …" captions
         ├── sections.json          # paper_spec parsed into per-section JSON
         └── narration.json         # TTS script only — no audio; each renderer synthesizes its own
@@ -50,7 +50,7 @@ Outputs land in `<outdir>/`, defaulting to `<input_pdf_dir>/<pdf_stem>/`. Pass a
 3. **Synthesize `paper_spec.md`** — a 9-section summary (Problem · Motivation · Contribution · Method · Dataset/Benchmark · Key Result · Ablation · Headline Numbers · Takeaway), each with `Necessary` / `Additional` / `Audio script` fields.
 4. **Clean every figure** — a deterministic chain (`top-check → decaption → autotrim`) plus an LLM-driven per-figure visual crop review, so downstream renderers get content-tight rasters with no page chrome, baked-in captions, or neighbouring-column bleed.
 5. **Fetch logos + QR codes** — one institute logo each (Wikimedia, best-effort) and QR codes for the paper/code links.
-6. **Build the canonical package** — `sections.json` + `narration.json` + `manifest.json` for the downstream skills.
+6. **Build the canonical package:** enrich `figures.json` with stable ids, caption provenance/quality, conservative roles, relevance, and exclusions, then build the downstream manifests. TeX captions take priority; noisy PDF captions and incomplete multi-graphic source figures fail closed. Motivation remains text-only unless it has explicit high-confidence evidence.
 
 > No audio is synthesized here — paper2assets stops at the narration **script** (`narration.json`); each renderer makes its own mp3s.
 
@@ -64,6 +64,7 @@ Re-running on an existing `<outdir>/` is safe: a Step-0 cache check reports and 
 scripts/
 ├── extract_pdf.py     # pdf → assets/meta/{text,captions,figures}.json + assets/figures/
 ├── crop_figure.py     # inspect / top-check / decaption / autotrim / box / split — figure cleanup
+├── figure_semantics.py # figures + captions + sections → stable semantic figure contract
 ├── fetch_logos.py     # spec → quality-gated assets/logos/* + authoritative logos.json
 ├── make_qr.py         # metadata → assets/qr/{paper,code}.png
 └── build_package.py   # paper_spec.md → manifest.json + assets/meta/{sections,narration}.json

@@ -86,6 +86,10 @@ SUBS = {
     "{{METHOD_1}}": "...", "{{METHOD_2}}": "...", "{{METHOD_3}}": "...",
     "{{METHOD_FIGURE}}":       "...",   # 'assets/figures/<page>_figure<n>.png'
     "{{METHOD_CAPTION}}":      "...",
+    # 3col only: fill from figure_selection.json selections.result; harmless
+    # extra keys are ignored by layouts that do not expose this optional slot.
+    "{{SECONDARY_FIGURE}}":    "...",
+    "{{SECONDARY_CAPTION}}":   "...",
     "{{KEY_RESULT_CONCLUSION}}": "...",
     "{{BASELINE}}": "...", "{{BASELINE_NUM}}": "...",
     "{{OURS}}": "...", "{{OURS_NUM}}": "...",

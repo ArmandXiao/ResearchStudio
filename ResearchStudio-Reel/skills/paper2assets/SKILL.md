@@ -77,7 +77,7 @@ After paper2assets finishes, `<outdir>/` MUST contain:
 |---|---|---|
 | `assets/meta/text.txt` | Step 2 | Full PDF text via `pdftotext`. Page breaks preserved as `\f`. Authoritative source of numbers/claims for any downstream prose. |
 | `assets/meta/captions.json` | Step 2 | `[{page, label, text}, ...]` per "Figure N: ..." caption detected in the PDF text. |
-| `assets/meta/figures.json` | Step 2 + 5 | `[{file, width, height, page, layout}, ...]` per extracted figure raster. `layout` is `"full"` / `"col-0"` / `"col-1"` etc. — the source-page column placement. `width`/`height` are updated whenever crop_figure.py runs. |
+| `assets/meta/figures.json` | Step 2 + 7 | Legacy-compatible per-raster list. Physical fields (`file`, `width`, `height`, `page`, `column`) remain unchanged; Step 7 adds caption provenance/quality, `figure_id`, semantic eligibility/role/confidence, `semantic_roles[]`, negative `section_exclusions[]`, and `section_relevance[]`. Every confidence is `0..1` and every semantic decision carries evidence. `width`/`height` are updated whenever crop_figure.py runs. |
 | `assets/figures/<page>_figure<n>.png` | Step 2 + 5 | Cropped figure rasters @ zoom=6 (~432 dpi). Cleaned by Step 5's deterministic pipeline. |
 | `assets/figures/_debug/<page>_figure<n>.png.bak` | Step 5 | One-shot backup of the raw extract before Step 5's first crop. Preserved across re-runs (never clobbered). Lives under `_debug/` so the top-level `figures/` listing stays clean — downstream renderers should only ever read from `figures/*.png`. |
 | `assets/figures/_debug/<page>_figure<n>.marked-<NN>.png` | Step 5d | Per-iteration overlay showing the bbox each `mark` call proposed (`-01`, `-02`, ...). Audit trail of the bbox-decision history. Never touched by downstream. |
@@ -86,9 +86,9 @@ After paper2assets finishes, `<outdir>/` MUST contain:
 | `assets/logos/<slug>.{png,svg}` | Step 6 | One approved logo per canonical institute: Wikimedia Commons first, then a MANDATORY WebSearch/WebFetch fallback (`--add-logo`) for any institute in `"missing"`. Every candidate is decoded and visually checked before approval; photos, covers, blank/low-contrast marks, corrupt responses, and duplicate visual encodings are rejected. |
 | `assets/logos/logos.json` | Step 6 | Authoritative institution-resource allowlist. `logos[]` contains only approved selections with canonical identity, source, visual fingerprint, and quality metrics. `rejected[]` records failed candidates and reasons; `missing[]` records unresolved institutes. Downstream renderers must not discover arbitrary files by scanning `assets/logos/`. |
 | `assets/qr/{paper,code}.png` | Step 6 | QR codes for the paper's links. `make_qr.py` classifies `paper_url`/`project_url`/`code_url` by destination (Paper/Code/Project), **de-duplicates by URL**, and writes up to two slots (slot 0 → `paper.png`, slot 1 → `code.png`) plus a `qr` manifest (path + `label`) into `metadata.json`. A one-link paper yields ONE QR (no `code.png`); the caption follows the URL, not the filename. |
-| `assets/meta/sections.json` | Step 7 | `paper_spec.md` parsed to per-section JSON (stable ids + necessary / additional / audio_script). Consumed by paper2blog / paper2video. |
+| `assets/meta/sections.json` | Step 7 | `paper_spec.md` parsed to per-section JSON (stable ids + necessary / additional / audio_script) with conservative semantic figure refs. Each ref carries a stable `figure_id`; `figure_ids[]` is the simple join key. Motivation is allowed to have no figure and rejects Method/Result/Ablation figures. Consumed by paper2blog / paper2video. |
 | `assets/meta/narration.json` | Step 7 | Audio **script** only — no mp3. TTS clip list `{provider, voice, sections:[{id, heading, text}]}` from the `**Audio script:**` markers (+ the title clip). Downstream renderers synthesize their own audio from this; paper2assets does NOT run TTS. |
-| `manifest.json` | Step 7 | Package inventory (file paths + counts + source-PDF sha256). |
+| `manifest.json` | Step 7 | Package inventory (file paths + counts + source-PDF sha256) plus a final `package_generation` commit marker and hashes for generated JSON artifacts. |
 
 ## Workflow
 
@@ -103,16 +103,20 @@ the caller-supplied outdir:
 
 ```bash
 required=("$outdir/assets/meta/paper_spec.md" "$outdir/assets/meta/text.txt" \
-          "$outdir/assets/meta/figures.json" "$outdir/assets/meta/metadata.json")
+          "$outdir/assets/meta/captions.json" "$outdir/assets/meta/figures.json" \
+          "$outdir/assets/meta/metadata.json")
 all_present=1
 for f in "${required[@]}"; do [[ -f "$f" ]] || all_present=0; done
-[[ -d "$outdir/assets/figures" && \
-   $(ls "$outdir/assets/figures"/*.png 2>/dev/null | wc -l) -gt 0 ]] \
-  || all_present=0
 ```
 
-If all five artifacts are present, REPORT the cached state in 1-2 lines
-and STOP — do not re-extract:
+An empty `figures.json` is valid for a paper with no usable figures. If all
+five canonical inputs are present, do not trust per-record schema strings as a
+cache gate. Reuse the expensive text/rasters/spec, but always refresh Step 7
+with the exact `build_package.py --skip-extract --paper-spec ...` command. It
+validates the complete semantic contract, atomically replaces each canonical
+JSON artifact, and writes `manifest.json` last with generation hashes.
+Only after that command succeeds, REPORT the cached state in 1-2 lines and
+STOP without re-extracting:
 
 ```
 [paper2assets] CACHED in <outdir> — assets from prior run, reusing.
@@ -120,6 +124,11 @@ and STOP — do not re-extract:
   figures: N PNGs
   paper_spec.md: <line-count> lines, K sections
 ```
+
+If the Step 7 refresh rejects a missing, corrupt, partial, or mixed-generation
+canonical document, do not report the bundle as ready. Repair the named input
+and rerun Step 7. Never send it to a manual/raw-model figure-selection
+fallback.
 
 Re-extract ONLY when:
 - one of the required artifacts is missing → resume from the missing step
@@ -158,6 +167,12 @@ Writes:
 3. **Backup (ONLY if 1 & 2 don't apply, or `source_figures.py` exits non-zero):** the PDF crop path below — full `extract_pdf.py` (with figures) **+ Step 5 `crop_figure.py`**.
 
 **If `source_figures.py` succeeded (exit 0):** run `extract_pdf.py <pdf> --outdir <outdir> --no-figures` (text.txt + captions.json ONLY) and **SKIP Step 5 (`crop_figure.py`) entirely** — the source graphics are already clean. **Otherwise** run the full `extract_pdf.py <pdf> --outdir <outdir>` (with figures) and do Step 5.
+
+`source_figures.py` fails closed on a TeX figure environment containing more
+than one `\\includegraphics`. Selecting only the first child would bind a
+composite caption to an incomplete raster. Its non-zero exit deliberately
+routes the whole paper through the PDF crop fallback, which preserves the
+rendered composite.
 
 **Appendix figures — skipped by DEFAULT.** Process **main-body figures only**. From `text.txt`, find where the appendix / supplementary material begins (the first `Appendix` / `Supplementary` heading, or `A.` / `B.` / `S1`… content after `References`) and note its `\f`-delimited page. **Drop every figure on or after that page** — delete the PNGs from `figures/` and their rows from `figures.json` *before* Step 5, so neither the cleaning loop nor any downstream renderer sees them. **Override only when the user explicitly asks** — e.g. "include the appendix figures" or naming a specific supplementary figure.
 
@@ -626,10 +641,13 @@ Downstream renderers still defensively handle a missing logo / missing `qr/code.
 paper2assets is the single source of truth for ALL paper-rendering skills downstream — not just paper2poster. Skills like paper2blog, paper2video, and paper2reel consume the same `<outdir>/` and rely on three additional canonical files that paper2poster doesn't need but they do:
 
 - `manifest.json` — package inventory (file paths + counts + source PDF sha256). Lets downstream verify the package shape without re-walking the directory.
-- `sections.json` — `paper_spec.md` parsed into structured per-section JSON with stable ids (`problem`, `motivation`, `method`, `key-result`, ...), the per-section `necessary` / `additional` / `audio_script` fields, and an empty `figures: []` per section (downstream joins with `figures.json` by id).
+- `sections.json`: `paper_spec.md` parsed into structured per-section JSON with stable ids (`problem`, `motivation`, `method`, `key-result`, ...), the per-section `necessary` / `additional` / `audio_script` fields, and conservative semantic figure refs. `figures[]` entries carry `figure_id`, `confidence`, `evidence`, and `source`; `figure_ids[]` provides a simple stable-id join.
+- `figures.json`: retains all legacy physical/caption fields and is enriched in place with stable ids, caption provenance/quality, semantic eligibility, caption/spec-grounded roles, section relevance, and negative section exclusions. TeX/source captions take precedence; noisy PDF-text captions and legacy source rasters without explicit provenance are quarantined instead of becoming selection evidence. Canonical roles are `motivation`, `method`, `dataset`, `result`, `ablation`, `qualitative`, and `context`.
 - `narration.json` — TTS clip list extracted from `**Audio script:**` markers, in document order. The title clip comes from the YAML frontmatter's `title_audio_script` field.
 
-paper2poster ignores these three files (it reads `paper_spec.md` directly), so this step is **additive** — generating them does not change anything paper2poster sees.
+Paper2Poster reads the enriched `figures.json` through its deterministic
+selector and validates the result during preflight. Other downstream skills
+may consume the section refs directly.
 
 **For each completed `<outdir>/`, run this exact sequence after Step 6:**
 
@@ -640,7 +658,9 @@ python ~/.claude/skills/paper2assets/scripts/build_package.py <pdf> \
     --paper-spec <outdir>/assets/meta/paper_spec.md
 ```
 
-Builds the 3 canonical JSON files from `paper_spec.md` + the already-extracted `text.txt` / `captions.json` / `figures.json` / `metadata.json`.
+Builds the 3 canonical JSON files and enriches `figures.json` from `paper_spec.md` + the already-extracted `text.txt` / `captions.json` / `figures.json` / `metadata.json`.
+
+The semantic pass is conservative by design. It does not force one image into every section. In particular, Motivation only receives a figure at confidence `>=0.62`, and any candidate also classified as Method, Result, or Ablation at confidence `>=0.55` is vetoed. A text-only Motivation section is preferable to a semantically wrong image. Key Result accepts either a quantitative `result` role or a high-confidence `qualitative` comparison, so `sections.json` and Paper2Poster's selector expose the same empirical visual to every downstream renderer.
 
 `build_package.py` notes:
 
@@ -668,11 +688,21 @@ Before declaring done, verify `<outdir>/` contains the required files:
 # Step 2 outputs (extraction)
 ls <outdir>/assets/meta/text.txt <outdir>/assets/meta/captions.json <outdir>/assets/meta/figures.json \
    <outdir>/assets/meta/metadata.json <outdir>/assets/meta/paper_spec.md
-ls <outdir>/assets/figures/*.png
+
+# Figure rasters are required only when figures.json is non-empty.
+if python -c 'import json,sys; sys.exit(not bool(json.load(open(sys.argv[1]))))' \
+    <outdir>/assets/meta/figures.json; then
+  ls <outdir>/assets/figures/*.png
+fi
 
 # Step 7 outputs (cross-skill canonical package)
 ls <outdir>/manifest.json <outdir>/assets/meta/sections.json <outdir>/assets/meta/narration.json
 ```
+
+`assets/meta/figures.json` may be an empty list. When it is non-empty, every
+listed `assets/figures/*.png` must exist; Paper2Poster's selector/preflight
+enforces that before rendering. Do not fail a genuinely figure-free paper only
+because the glob has no matches.
 
 The optional `logos/` and `qr/` directories may be empty or absent (best-effort fetch); a downstream renderer is responsible for handling that gracefully.
 
@@ -684,6 +714,7 @@ Print the absolute outdir path on the last line of your reply so the caller (pos
 scripts/
 ├── extract_pdf.py        ← CLI: pdf → assets/meta/{text.txt,captions.json,figures.json} + assets/figures/
 ├── crop_figure.py        ← CLI: inspect / autotrim / box / decaption / top-check
+├── figure_semantics.py   ← enrich figures.json + sections.json with stable semantic refs
 ├── fetch_logos.py        ← CLI: spec → assets/logos/*.{png,svg} (Wikimedia Commons)
 ├── make_qr.py            ← CLI: metadata → assets/qr/{paper,code}.png
 └── build_package.py      ← CLI: assets/meta/paper_spec.md → manifest.json + assets/meta/{sections.json,narration.json}

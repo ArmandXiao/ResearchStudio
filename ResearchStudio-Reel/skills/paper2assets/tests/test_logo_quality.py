@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -138,3 +139,40 @@ def test_autotrim_preserves_transparent_white_artwork(tmp_path) -> None:
     assert trimmed.width < 240
     assert trimmed.height < 100
     assert trimmed.getchannel("A").getextrema()[1] == 255
+
+
+def test_autotrim_jpeg_is_atomic_and_nonempty(tmp_path) -> None:
+    image = Image.new("RGB", (320, 160), "white")
+    ImageDraw.Draw(image).rectangle((50, 35, 270, 125), fill=(25, 70, 145))
+    path = tmp_path / "wordmark.jpg"
+    image.save(path, format="JPEG", quality=92)
+    if os.name != "nt":
+        path.chmod(0o644)
+
+    result = autotrim(path)
+    trimmed = Image.open(result)
+
+    assert result == path
+    assert path.stat().st_size > 0
+    assert trimmed.format == "JPEG"
+    assert trimmed.width < 320
+    assert trimmed.height < 160
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o7777 == 0o644
+
+
+def test_autotrim_encode_failure_preserves_original(tmp_path, monkeypatch) -> None:
+    image = Image.new("RGB", (320, 160), "white")
+    ImageDraw.Draw(image).rectangle((50, 35, 270, 125), fill=(25, 70, 145))
+    path = tmp_path / "wordmark.jpg"
+    image.save(path, format="JPEG", quality=92)
+    original = path.read_bytes()
+
+    def fail_save(*_args, **_kwargs) -> None:
+        raise OSError("simulated encode failure")
+
+    monkeypatch.setattr(Image.Image, "save", fail_save)
+
+    assert autotrim(path) == path
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".wordmark-trim-*")) == []

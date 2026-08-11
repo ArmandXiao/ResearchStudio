@@ -184,6 +184,15 @@ _ZONES_JS = r"""(arg)=>{const out=[];
   const includeEmpty=!Array.isArray(arg)&&!!arg.includeEmpty;
   sels.forEach(sel=>{document.querySelectorAll(sel).forEach((z,zi)=>{
     const r=z.getBoundingClientRect(); if(r.width<8||r.height<8) return;
+    // The packer inserts rows into the zone's CONTENT box.  Measuring the
+    // border box overstates the usable width/height whenever a header adds
+    // rail padding (Portrait pv2 is a common example), which can leave the
+    // last wide wordmark spilling into that padding.  Preserve W/H as the
+    // historical outer-box values, but expose the actual inner budget for the
+    // geometry search below.
+    const cs=getComputedStyle(z); const px=n=>parseFloat(n)||0;
+    const insetX=px(cs.paddingLeft)+px(cs.paddingRight)+px(cs.borderLeftWidth)+px(cs.borderRightWidth);
+    const insetY=px(cs.paddingTop)+px(cs.paddingBottom)+px(cs.borderTopWidth)+px(cs.borderBottomWidth);
     // IDEMPOTENCY: a prior bake collapses the zone to its packed-content height, so a
     // re-bake would then only ever fit ONE row. Remember the ORIGINAL available height on
     // the first bake and reuse it, so re-running fit_logos re-packs against the real header
@@ -205,6 +214,7 @@ _ZONES_JS = r"""(arg)=>{const out=[];
     // target into which it can auto-complete those manifest-approved marks.
     if(!logos.length && !qrImgs.length && !includeEmpty) return;
     out.push({sel, idx:[...document.querySelectorAll(sel)].indexOf(z), W:r.width, H:H,
+      innerW:Math.max(1,r.width-insetX), innerH:Math.max(1,H-insetY),
       logos:logos.map(im=>({src:im.getAttribute('src'), natW:im.naturalWidth, natH:im.naturalHeight})),
       qrs:qrImgs.map(im=>{const fig=im.closest('figure, .qr-tile, .qr');
         const lb=fig?(fig.querySelector('figcaption, .qr-lbl, .qr-label, span')||{}).textContent:'';
@@ -513,8 +523,11 @@ def bake(poster_path, max_rows=3, pad_frac=0.06):
                 relocate_qrs.extend({"src": s, "label": lb} for s, lb in qr_src)
                 qr_src = []
             qrs = [Mark("qr", 1.0, 1.0, lb) for _, lb in qr_src]
-            pad = min(z["W"], z["H"]) * pad_frac
-            b = best_arrangement(logos, qrs, z["W"], z["H"], pad=pad, max_rows=max_rows)
+            usable_w = z.get("innerW", z["W"])
+            usable_h = z.get("innerH", z["H"])
+            pad = min(usable_w, usable_h) * pad_frac
+            b = best_arrangement(logos, qrs, usable_w, usable_h,
+                                 pad=pad, max_rows=max_rows)
             id2i = {id(m): i for i, m in enumerate(logos)}
             spec_rows = []
             for r, h in zip(b["rows"], b["row_heights"]):

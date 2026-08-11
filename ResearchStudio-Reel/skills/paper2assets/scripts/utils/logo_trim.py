@@ -17,6 +17,7 @@ Public API:
 """
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 # A pixel counts as background if it is (near-)transparent OR opaque near-white.
@@ -87,11 +88,38 @@ def _trim_png_in_place(path: Path) -> bool:
     r = min(w, r + _PAD); b = min(h, b + _PAD)
     if (l, t, r, b) == (0, 0, w, h):
         return False  # already tight
+    # Never save back through the same path that Pillow opened.  Apart from
+    # making a partially-written file observable, RGBA -> JPEG raises only
+    # after Pillow has opened and truncated the destination.  Write beside the
+    # source and atomically replace it after a complete, non-empty encode.
+    source_mode = path.stat().st_mode & 0o7777
+    temporary: Path | None = None
     try:
-        im.crop((l, t, r, b)).save(path)
+        cropped = im.crop((l, t, r, b))
+        suffix = path.suffix.lower()
+        image_format = {
+            ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG",
+            ".gif": "GIF", ".webp": "WEBP", ".bmp": "BMP",
+        }.get(suffix)
+        if image_format == "JPEG":
+            cropped = cropped.convert("RGB")
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.stem}-trim-",
+            suffix=path.suffix, delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+        cropped.save(temporary, format=image_format)
+        if temporary.stat().st_size <= 0:
+            return False
+        temporary.chmod(source_mode)
+        temporary.replace(path)
+        temporary = None
         return True
     except Exception:
         return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _rasterize_svg(svg: Path, png: Path) -> bool:

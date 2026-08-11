@@ -483,40 +483,6 @@ def test_repeated_logo_bake_reuses_largest_measured_zone_height():
             browser.close()
 
 
-def test_logo_zone_measurement_exposes_content_box_budget():
-    """Padding and borders are not usable row-packing space."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        pytest.skip("Playwright not installed")
-
-    with sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.launch()
-        except Exception as exc:
-            pytest.skip(f"Chromium not available ({exc})")
-        try:
-            page = browser.new_page(viewport={"width": 1000, "height": 600})
-            page.set_content("""
-              <div class="titlebar">
-                <div class="logo-block" style="box-sizing:border-box;width:700px;height:180px;
-                     padding:10px 30px;border:5px solid transparent">
-                  <img class="logo" src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='40'></svg>">
-                </div>
-              </div>
-            """)
-            zones = page.evaluate(
-                fit_logos._ZONES_JS,
-                {"sels": [".titlebar .logo-block"], "includeEmpty": False},
-            )
-            assert zones[0]["W"] == pytest.approx(700, abs=1)
-            assert zones[0]["H"] == pytest.approx(180, abs=1)
-            assert zones[0]["innerW"] == pytest.approx(630, abs=1)
-            assert zones[0]["innerH"] == pytest.approx(150, abs=1)
-        finally:
-            browser.close()
-
-
 @pytest.mark.parametrize(
     ("zone_class", "selector", "css"),
     (

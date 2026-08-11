@@ -17,6 +17,7 @@ Public API:
 """
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 # A pixel counts as background if it is (near-)transparent OR opaque near-white.
@@ -35,7 +36,16 @@ def _content_bbox(im):
         if arr.ndim != 3 or arr.shape[2] < 4:
             return None
         rgb, alpha = arr[..., :3], arr[..., 3]
-        content = (alpha > _ALPHA_MIN) & (rgb.min(axis=2) < _NEAR_WHITE)
+        # When the source has meaningful transparency, alpha defines artwork.
+        # Intersecting alpha with "non-white" erased white wordmarks and made
+        # their bbox look empty. Fully opaque rasters still use near-white as
+        # the removable canvas background.
+        has_transparency = bool((alpha < 250).mean() >= 0.005)
+        content = (
+            alpha > _ALPHA_MIN
+            if has_transparency
+            else rgb.min(axis=2) < _NEAR_WHITE
+        )
         if not content.any():
             return None
         ys, xs = content.nonzero()
@@ -45,16 +55,16 @@ def _content_bbox(im):
     # Pillow-only fallback: intersect the opaque bbox with the non-white bbox.
     try:
         from PIL import Image, ImageChops
-        alpha_bbox = im.split()[3].getbbox()
+        alpha = im.split()[3]
+        alpha_bbox = alpha.getbbox()
+        alpha_min, _ = alpha.getextrema()
         rgb = im.convert("RGB")
         diff = ImageChops.difference(rgb, Image.new("RGB", im.size, (255, 255, 255)))
         nonwhite = diff.convert("L").point(lambda p: 255 if p > (255 - _NEAR_WHITE) else 0)
         white_bbox = nonwhite.getbbox()
-        if alpha_bbox and white_bbox:
-            l = max(alpha_bbox[0], white_bbox[0]); t = max(alpha_bbox[1], white_bbox[1])
-            r = min(alpha_bbox[2], white_bbox[2]); b = min(alpha_bbox[3], white_bbox[3])
-            return (l, t, r, b) if (r > l and b > t) else None
-        return alpha_bbox or white_bbox
+        if alpha_min < 250:
+            return alpha_bbox
+        return white_bbox
     except Exception:
         return None
 
@@ -78,11 +88,38 @@ def _trim_png_in_place(path: Path) -> bool:
     r = min(w, r + _PAD); b = min(h, b + _PAD)
     if (l, t, r, b) == (0, 0, w, h):
         return False  # already tight
+    # Never save back through the same path that Pillow opened.  Apart from
+    # making a partially-written file observable, RGBA -> JPEG raises only
+    # after Pillow has opened and truncated the destination.  Write beside the
+    # source and atomically replace it after a complete, non-empty encode.
+    source_mode = path.stat().st_mode & 0o7777
+    temporary: Path | None = None
     try:
-        im.crop((l, t, r, b)).save(path)
+        cropped = im.crop((l, t, r, b))
+        suffix = path.suffix.lower()
+        image_format = {
+            ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG",
+            ".gif": "GIF", ".webp": "WEBP", ".bmp": "BMP",
+        }.get(suffix)
+        if image_format == "JPEG":
+            cropped = cropped.convert("RGB")
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.stem}-trim-",
+            suffix=path.suffix, delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+        cropped.save(temporary, format=image_format)
+        if temporary.stat().st_size <= 0:
+            return False
+        temporary.chmod(source_mode)
+        temporary.replace(path)
+        temporary = None
         return True
     except Exception:
         return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _rasterize_svg(svg: Path, png: Path) -> bool:

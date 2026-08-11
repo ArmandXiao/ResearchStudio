@@ -9,15 +9,15 @@ are untouched, so re-theming is O(seconds) with no Claude tokens and no
 Playwright re-render.
 
 The injection point (the `:root` `--accent` / `--accent-soft` / `--callout`
-lines) is IDENTICAL in the landscape composed poster.html and in the legacy
-portrait monolith, so ONE injector re-themes both orientations.
+lines) is IDENTICAL in the composed landscape and portrait poster.html files,
+so ONE injector re-themes both orientations.
 
 Random theme selection is DETERMINISTIC: `--theme random` hashes a seed
 (default the poster path) so a wave of posters gets a stable, reproducible
 SPREAD across the palette -- the same mechanism `compose_poster.py` uses for
 its layout/style/header axes, and NOT a flaky model "pick a color" step.
 
-Five deep-academic bundles. Each theme's `--callout` deliberately CONTRASTS its
+Nine academic bundles. Each theme's `--callout` deliberately CONTRASTS its
 `--accent` so the "this is the result" register never clashes with a same-hue
 accent (a red poster gets a navy callout, etc.). Neutrals (text / muted / bg)
 are the templates' fixed defaults and are NOT swapped. Every accent is dark +
@@ -37,11 +37,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
 
-# 8 theme bundles -- single source of truth, taken verbatim from the palette the
+# 9 theme bundles -- single source of truth, taken from the palette the
 # gallery recolor used (p2p-bench/gen_gallery_pdf.py PALETTE), the "good color
 # schemes" this pool is meant to reproduce. Each is {accent, accent-soft}; the
 # result-register `--callout` (#ae2622 crimson) is deliberately NOT swapped, so
@@ -141,6 +142,73 @@ def recolor(src: str, theme: dict[str, str]) -> tuple[str, list[tuple[str, str, 
     return out, changes
 
 
+def _sync_html_theme_metadata(src: str, theme_name: str) -> str:
+    """Keep the embedded manifest and body audit attribute aligned with CSS."""
+    script_re = re.compile(
+        r'(<script\b[^>]*\bid=["\']paper2poster-composition["\'][^>]*>)'
+        r'(.*?)(</script\s*>)',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def update_script(match: re.Match[str]) -> str:
+        try:
+            payload = json.loads(match.group(2))
+        except (TypeError, ValueError):
+            return match.group(0)
+        resolved = payload.get("resolved")
+        if not isinstance(resolved, dict):
+            return match.group(0)
+        resolved["theme"] = theme_name
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                             indent=2).replace("</", "<\\/")
+        return f"{match.group(1)}{encoded}{match.group(3)}"
+
+    out = script_re.sub(update_script, src, count=1)
+    body_re = re.compile(r'<body\b[^>]*>', re.IGNORECASE)
+
+    def update_body(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        attr_re = re.compile(
+            r'(\bdata-poster-theme\s*=\s*)(["\']).*?\2',
+            re.IGNORECASE,
+        )
+        if attr_re.search(tag):
+            return attr_re.sub(
+                lambda m: f'{m.group(1)}{m.group(2)}{theme_name}{m.group(2)}',
+                tag,
+                count=1,
+            )
+        return tag[:-1] + f' data-poster-theme="{theme_name}">'
+
+    # Template documentation may mention a literal ``<body>`` inside CSS
+    # comments. Only search after the real closing ``</head>`` boundary.
+    head_end = re.search(r'</head\s*>', out, re.IGNORECASE)
+    if not head_end:
+        return body_re.sub(update_body, out, count=1)
+    prefix = out[:head_end.end()]
+    tail = out[head_end.end():]
+    return prefix + body_re.sub(update_body, tail, count=1)
+
+
+def _sync_selection_file(html_path: Path, theme_name: str) -> None:
+    """Update the conventional sibling selection manifest when it exists."""
+    selection_path = html_path.parent / "selection.json"
+    if not selection_path.exists():
+        return
+    try:
+        payload = json.loads(selection_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return
+    resolved = payload.get("resolved")
+    if not isinstance(resolved, dict):
+        return
+    resolved["theme"] = theme_name
+    selection_path.write_text(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def apply_theme_to_file(html_path: Path, theme_name: str, *,
                         seed: str | None = None) -> str:
     """Resolve ``theme_name`` (``random`` keyed by ``seed`` or the path), recolor
@@ -149,7 +217,9 @@ def apply_theme_to_file(html_path: Path, theme_name: str, *,
     resolved = resolve_theme(theme_name, seed or str(html_path))
     src = html_path.read_text(encoding="utf-8")
     new_src, _ = recolor(src, THEMES[resolved])
+    new_src = _sync_html_theme_metadata(new_src, resolved)
     html_path.write_text(new_src, encoding="utf-8")
+    _sync_selection_file(html_path, resolved)
     return resolved
 
 
@@ -179,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     resolved = resolve_theme(args.theme, args.seed or str(args.html))
     src = args.html.read_text(encoding="utf-8")
     new_src, changes = recolor(src, THEMES[resolved])
+    new_src = _sync_html_theme_metadata(new_src, resolved)
 
     if not changes:
         print(f"[apply_theme] {args.html}: no recolorable vars found "
@@ -196,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dest = args.output or args.html
     dest.write_text(new_src, encoding="utf-8")
+    _sync_selection_file(dest, resolved)
     if dest != args.html:
         print(f"[apply_theme] wrote {dest}")
     return 0

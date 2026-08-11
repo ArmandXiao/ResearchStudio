@@ -138,6 +138,10 @@ function renderGrid(data){
 const REDUCE_MOTION = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const CAROUSEL_SPEED = 0.45; // px per frame
 let carouselTracks = [];
+const carouselStateByTrack = new WeakMap();
+function wrapCarouselPhase(value, period){
+  return ((value % period) + period) % period;
+}
 // Idempotent per track: a track already set up keeps its duplicated content and its
 // measured period, so this can be re-run on resize without duplicating twice.
 function setupCarouselAutoScroll(){
@@ -145,7 +149,17 @@ function setupCarouselAutoScroll(){
   document.querySelectorAll(".carousel").forEach(track => {
     const wrap = track.closest(".carousel-wrap");
     if (track.dataset.looping === "1"){
-      carouselTracks.push({ el: track, singleWidth: +track.dataset.period, paused: false });
+      const n = track.children.length / 2;
+      const kids = track.children;
+      const measuredWidth = kids[n] ? kids[n].offsetLeft - kids[0].offsetLeft : 0;
+      const singleWidth = measuredWidth > 0 ? measuredWidth : +track.dataset.period;
+      const state = carouselStateByTrack.get(track);
+      if (state){
+        state.singleWidth = singleWidth;
+        state.position = wrapCarouselPhase(track.scrollLeft, singleWidth);
+        track.dataset.period = String(singleWidth);
+        carouselTracks.push(state);
+      }
       return;
     }
     if (track.scrollWidth <= track.clientWidth + 4){
@@ -167,10 +181,13 @@ function setupCarouselAutoScroll(){
     const singleWidth = kids[n] ? kids[n].offsetLeft - kids[0].offsetLeft : track.scrollWidth;
     track.dataset.looping = "1";
     track.dataset.period = String(singleWidth);
-    const state = { el: track, singleWidth, paused: false };
+    const state = { el: track, singleWidth, position: 0, paused: false };
+    carouselStateByTrack.set(track, state);
     track.addEventListener("mouseenter", () => { state.paused = true; });
     track.addEventListener("mouseleave", () => { state.paused = false; });
     track.addEventListener("pointerdown", () => { state.paused = true; });
+    track.addEventListener("pointerup", () => { state.paused = false; });
+    track.addEventListener("pointercancel", () => { state.paused = false; });
     carouselTracks.push(state);
   });
 }
@@ -186,12 +203,18 @@ window.addEventListener("resize", () => {
 (function tickCarousels(){
   if (!REDUCE_MOTION) {
     carouselTracks.forEach(s => {
-      if (s.paused) return;
+      // Keep the floating-point phase in JS. Chromium rounds sub-pixel scrollLeft
+      // writes, so deriving every frame from the DOM would discard the speed.
+      if (s.paused){
+        s.position = wrapCarouselPhase(s.el.scrollLeft, s.singleWidth);
+        return;
+      }
       // Shift by exactly one period so the wrap is phase-continuous and invisible.
       // Never clamp the landing position: clamping leaves a residual offset that
       // accumulates into a visible jump.
-      const next = s.el.scrollLeft + CAROUSEL_SPEED;
-      s.el.scrollLeft = next >= s.singleWidth ? next - s.singleWidth : next;
+      const next = s.position + CAROUSEL_SPEED;
+      s.position = next >= s.singleWidth ? next - s.singleWidth : next;
+      s.el.scrollLeft = s.position;
     });
   }
   requestAnimationFrame(tickCarousels);
@@ -498,7 +521,15 @@ document.addEventListener("click", (ev) => {
   const nav = ev.target.closest(".cnav");
   if (nav) {
     const track = document.getElementById(nav.dataset.target);
-    if (track) track.scrollBy({left: nav.classList.contains("prev") ? -320 : 320, behavior:"smooth"});
+    if (track){
+      const state = carouselStateByTrack.get(track);
+      if (state){
+        state.paused = true;
+        clearTimeout(state._resume);
+        state._resume = setTimeout(() => { state.paused = false; }, 900);
+      }
+      track.scrollBy({left: nav.classList.contains("prev") ? -320 : 320, behavior:"smooth"});
+    }
     return;
   }
   const node = ev.target.closest(".node");

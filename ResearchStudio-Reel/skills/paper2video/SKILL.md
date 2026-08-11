@@ -232,6 +232,15 @@ default high-quality route is `ppt-master`.
 - If a machine dependency is missing, record the concrete missing dependency and
   stop. Do not silently degrade to a different slide-generation method.
 
+Resolve PPT options once before invoking ppt-master. Content-related Auto values
+(page count, narrative mode, audience, images, and formulas) remain paper-aware
+model decisions. Appearance Auto values (visual style, color direction, and
+typography direction) are selected from the canonical finite pools by
+`resolve_auto_ppt_appearance()` using the immutable task token. Persist that
+appearance receipt with the validated resolution in `resolved_options.json`,
+then reuse the merged locked configuration for every downstream step and retry.
+Never rerandomize an in-progress task. Explicit appearance values are unchanged.
+
 When using `ppt-master`, prepare title-slide utility assets before invoking the
 deck workflow:
 
@@ -570,6 +579,11 @@ The gate must pass before delivery. If it fails, fix the deck/script/audio/cues
 and re-render; do not bypass strict mode for final output. Only pass
 `--allow-missing-attention` for an explicitly user-approved degraded/debug run
 with no highlight.
+
+`audio_extra_files` remains visible in the QA report but is non-blocking: an
+unreferenced MP3 does not change `script.json`, the timeline, or either final
+MP4. Every other warning remains blocking under `--strict` or
+`--fail-on-warning`, and every error is always blocking.
 
 Write `$VIDEO_OUT/manifest.json` with `"layout": "v2-assets"` and root-relative
 paths for both MP4 deliverables plus `assets/audio/`, `assets/captions/`,

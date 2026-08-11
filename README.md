@@ -19,7 +19,7 @@ The skills run on [Claude Code](https://docs.claude.com/en/docs/claude-code/over
 
 <div align="center">
 
-#### [📄 Paper](https://arxiv.org/abs/2607.04438) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Reel/) &nbsp;·&nbsp; [🎬 Demo](https://researchstudio.site/)
+#### [📄 Paper](https://arxiv.org/abs/2607.04438) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Reel/) &nbsp;·&nbsp; [🎬 Demo](https://researchstudio.site/?tool=poster)
 
 </div>
 
@@ -34,7 +34,7 @@ The skills run on [Claude Code](https://docs.claude.com/en/docs/claude-code/over
 
 <div align="center">
 
-#### [📄 Paper](https://arxiv.org/abs/2607.04439) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Idea/) &nbsp;·&nbsp; [🎬 Demo](https://researchstudio.site/)
+#### [📄 Paper](https://arxiv.org/abs/2607.04439) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Idea/) &nbsp;·&nbsp; [🎬 Demo](https://researchstudio.site/?tool=idea)
 
 </div>
 

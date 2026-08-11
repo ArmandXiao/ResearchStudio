@@ -117,6 +117,9 @@ function renderAll(){
 const REDUCE_MOTION = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const SPEED = 0.4; // px/frame
 let tracks = [];
+function wrapPhase(value, period){
+  return ((value % period) + period) % period;
+}
 function setupAutoScroll(){
   tracks = [];
   document.querySelectorAll("#wall-view .wall").forEach((track, idx) => {
@@ -133,8 +136,9 @@ function setupAutoScroll(){
       : track.scrollWidth / 2;
     if (period <= 0) return;
     const dir = idx % 2 ? -1 : 1;                           // alternate row directions
-    if (dir < 0) track.scrollLeft = period;
-    const state = { el: track, period, paused: false, dir };
+    const position = dir < 0 ? period : 0;
+    track.scrollLeft = position;
+    const state = { el: track, originalCount, period, position, paused: false, dir };
     // Pause ONLY while the cursor is over an actual poster tile — not the gaps/padding.
     track.addEventListener("mousemove", (e) => { state.paused = !!(e.target.closest && e.target.closest(".tile")); });
     track.addEventListener("mouseleave", () => { state.paused = false; });
@@ -147,14 +151,36 @@ function setupAutoScroll(){
     tracks.push(state);
   });
 }
+let wallResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(wallResizeTimer);
+  wallResizeTimer = setTimeout(() => {
+    tracks.forEach(s => {
+      const kids = s.el.children;
+      const period = kids[s.originalCount]
+        ? kids[s.originalCount].offsetLeft - kids[0].offsetLeft
+        : s.period;
+      if (period <= 0) return;
+      s.period = period;
+      s.position = wrapPhase(s.el.scrollLeft, period);
+    });
+  }, 150);
+});
 (function tick(){
   if (!REDUCE_MOTION) tracks.forEach(s => {
-    if (s.paused) return;
-    const next = s.el.scrollLeft + SPEED * s.dir;
+    // Keep the floating-point phase in JS. Chromium rounds sub-pixel scrollLeft
+    // writes, so deriving every frame from the DOM would discard SPEED entirely.
+    if (s.paused){
+      s.position = wrapPhase(s.el.scrollLeft, s.period);
+      return;
+    }
+    const next = s.position + SPEED * s.dir;
     // Wrap by exactly one period, and ONLY on the edge this row is travelling toward.
     // Checking both edges makes each wrap land on the other edge's trigger -> per-frame ping-pong.
-    if (s.dir > 0) s.el.scrollLeft = next >= s.period ? next - s.period : next;
-    else           s.el.scrollLeft = next <= 0        ? next + s.period : next;
+    s.position = s.dir > 0
+      ? (next >= s.period ? next - s.period : next)
+      : (next <= 0 ? next + s.period : next);
+    s.el.scrollLeft = s.position;
   });
   requestAnimationFrame(tick);
 })();

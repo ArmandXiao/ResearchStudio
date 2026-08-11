@@ -171,25 +171,39 @@
     left: 0;
     transform-origin: top left;
   }
-  /* Title bar — 3-zone layout:
-       LEFT  : .venue-badge  → big VENUE / YEAR / POSTER tag (own column, divider rule on the right)
-       CENTER: .title-block  → title, authors, optional contact (flex-grow takes leftover width)
-       RIGHT : .logo-block   → one or more institute logos (PNG/SVG), each on a transparent
-                              white tile, stacked horizontally. Auto-hides if no logos.
-     The listen-all button stays absolutely positioned to the titlebar's bottom-left, unchanged. */
+  /* Portrait titlebar contract. Venue + QR form one utility rail; institution
+     marks get a separate tall rail so fit_logos measures a genuine 2-D packing
+     zone instead of the height of a single pre-fit logo row. Header partials
+     may mirror the two rails, but all three resources stay on one compact row
+     across pv1-pv5. */
   .titlebar {
+    --portrait-meta-track: 292pt;
+    --portrait-inst-track: 570pt;
+    --portrait-edge-pad: 56pt;
     background: var(--tb-bg, var(--accent));
     color: var(--tb-fg, white);
-    padding: 32pt 56pt;
+    padding: 32pt var(--portrait-edge-pad);
     border-radius: 6px;
     flex: 0 0 auto;
     position: relative;
     display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 48pt;
+    grid-template-columns: var(--portrait-meta-track) minmax(0, 1fr) var(--portrait-inst-track);
+    grid-template-areas: "mr tt ir";
+    align-items: stretch;
+    gap: 32pt;
   }
-  .titlebar .title-block { text-align: center; min-width: 0; }
+  /* Do not reserve a blank institution rail when no logo resolved. This also
+     remains true after fit_logos replaces the placeholder images with packed
+     row images that no longer carry the original `.logo` class. */
+  .titlebar:not(:has(.institution-rail img[src]:not([src=""]):not([src*="{{"]))) {
+    --portrait-inst-track: 0pt;
+  }
+  .titlebar .title-block {
+    grid-area: tt;
+    align-self: center;
+    text-align: center;
+    min-width: 0;
+  }
   .titlebar h1 {
     margin: 0 0 0.25em 0;
     /* PORTRAIT R2: h1 92pt→72pt. Landscape's 92pt forced long titles
@@ -217,15 +231,34 @@
   .titlebar .authors sup,
   .titlebar .contact sup { font-size: 0.65em; vertical-align: super; line-height: 0; }
 
-  /* LEFT zone: venue badge (VENUE / YEAR / tag). Vertical hairline on the right separates
-     it from the title block, exactly like the reference landscape_4col_neutral header. */
+  /* Venue and QR stay together in the Portrait-only meta rail. Moving the
+     divider to the rail keeps the two utilities visually bound as one unit. */
+  .titlebar .meta-rail {
+    grid-area: mr;
+    box-sizing: border-box;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    gap: 22pt;
+    /* Include the titlebar's outer edge padding in the visual rail.  Without
+       this extension, content can be mathematically centered in the grid
+       track but still look pulled toward the divider because the 56pt page-
+       edge gutter sits outside that track. */
+    margin-left: calc(-1 * var(--portrait-edge-pad));
+    padding: 0 14pt;
+    border-right: 2px solid var(--tb-divider, rgba(255, 255, 255, 0.35));
+  }
   .titlebar .venue-badge {
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     text-align: center;
-    padding-right: 48pt;
-    border-right: 2px solid var(--tb-divider, rgba(255, 255, 255, 0.35));
+    padding: 0;
+    border: 0;
     min-width: 4em;
+    width: 100%;
+    max-width: 100%;
   }
   .titlebar .venue-badge .vb-venue {
     /* PORTRAIT R2: vb-venue 88pt→64pt for narrower titlebar. */
@@ -266,36 +299,33 @@
     text-decoration: none;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
   }
   .titlebar .vb-link:hover { opacity: 0.85; }
   .titlebar .vb-link[href=""],
   .titlebar .vb-link:not([href]) { pointer-events: none; cursor: default; }
 
-  /* RIGHT zone wrapper. Two stacked rows: the institute logos on top, the
-     paper / code QR tiles below. Each row independently auto-hides when it
-     has nothing to show, so a paper with no QRs collapses back to just the
-     logos (and vice versa, in the rare logos-empty case). The titlebar
-     grid track auto-sizes to whichever row is wider. */
-  .titlebar .right-zone {
-    display: flex; flex-direction: column;
-    align-items: center;
-    gap: 18pt;
-  }
-
-  /* RIGHT zone, top row: institute logos. One or more <img class="logo">
-     children, each on a small white tile so dark/colored marks read against
-     the accent-blue titlebar. Logos are sized to a fixed HEIGHT (so wide
-     and square marks stay visually balanced) and laid out in a STRICT
-     SINGLE-LINE horizontal flex row (no wrap): all 1–4 institute logos
-     must sit side by side on one line — the titlebar grid's auto-sized
-     right track widens to fit them, and the center title-block (1fr)
-     yields any leftover width. The block hides itself when it has no
-     rendered logos so the title-block re-centers naturally. */
-  .titlebar .logo-block {
+  /* Institution rail. The 570pt x >=450pt box is deliberately narrow and
+     tall: 4 square marks can settle into a 2x2 arrangement, while mixed
+     wordmarks/seals can use the packer's 1+3 or 1+2+1 shelves. It is a direct
+     titlebar grid item in every pv header, so fit_logos sees this full box. */
+  .titlebar .logo-block.institution-rail {
+    grid-area: ir;
+    box-sizing: border-box;
+    min-width: 0;
+    /* Keep enough 2-D area for fit_logos without making the brand rail set a
+       fixed 16-18% Header floor. The Half layout can use a more compact brand
+       rail because fit_logos still measures and packs the full 2-D zone. */
+    min-height: 300pt;
+    align-self: stretch;
+    justify-self: stretch;
     display: flex; flex-direction: row;
     align-items: center; justify-content: center;
     gap: 14pt;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    align-content: center;
   }
   .titlebar .logo-block .logo {
     height: 110pt;
@@ -316,24 +346,19 @@
     display: none;
   }
 
-  /* RIGHT zone, bottom row: paper + code QR tiles. Same single-line, no-wrap
-     rules as .logo-block so the two tiles always sit side by side under the
-     logos. Each tile is a square white card with a "Paper" / "Code" label
+  /* Meta rail QR row. Each tile is a square white card with a "Paper" / "Code" label
      beneath the QR — labels disambiguate the two destinations for a passerby
      so they don't have to scan both to find out what each one points to.
-     QRs are sized at 170pt (~2.4in printed, ~227px in the 3178px viewport),
-     comfortably above the ~1.5in floor where phone scanners get unreliable
-     and visibly larger than the 110pt logo above (a QR is an active
-     call-to-action, not a brand mark). Going past ~200pt swells the
-     titlebar enough to push column sections into SPILLAGE, so do not
-     enlarge further without budgeting the column-row hit. Either tile can
+     QRs are sized at 132pt (~1.8in printed), which keeps two distinct links on
+     one row inside the 292pt meta rail while staying above the 1.5in scan floor.
+     Either tile can
      be absent — the per-tile auto-hide rule drops a tile whose {{QR_*}}
      placeholder didn't substitute, and the whole .qr-block auto-hides
      when both tiles are gone. */
   .titlebar .qr-block {
     display: flex; flex-direction: row;
     align-items: flex-start; justify-content: center;
-    gap: 22pt;
+    gap: 14pt;
     flex-wrap: nowrap;
   }
   .titlebar .qr-block .qr {
@@ -342,7 +367,8 @@
     flex-shrink: 0;
   }
   .titlebar .qr-block .qr-img {
-    width: 170pt; height: 170pt;
+    box-sizing: border-box;
+    width: 132pt; height: 132pt;
     background: white;
     padding: 9pt;
     border-radius: 9pt;
@@ -1141,6 +1167,36 @@
      Note: a landscape style's .section padding (32pt) rides fine on the
      0.90 FULL gate + render-time 0.98 expand. */
   {{STYLE_CSS}}
+
+  /* PORTRAIT STYLE COMPATIBILITY. Preserve every Landscape card grammar but
+     restore narrow-canvas density and consume the complete titlebar contract. */
+  body[data-poster-orientation="portrait"] .titlebar {
+    background: var(--tb-bg, var(--accent-soft));
+    color: var(--tb-fg, var(--text));
+    border: var(--tb-border, none);
+    border-radius: var(--tb-radius, 6px);
+    box-shadow: var(--tb-shadow, none);
+  }
+  body[data-poster-orientation="portrait"] .titlebar h1 {
+    color: var(--tb-title-fg, var(--tb-fg, var(--text)));
+  }
+  body[data-poster-orientation="portrait"] .titlebar .authors,
+  body[data-poster-orientation="portrait"] .titlebar .author-legend,
+  body[data-poster-orientation="portrait"] .titlebar .contact {
+    color: var(--tb-sub-fg, var(--tb-fg, var(--text)));
+  }
+  body[data-poster-orientation="portrait"] .titlebar .logo,
+  body[data-poster-orientation="portrait"] .titlebar .qr-img {
+    background: var(--tb-chip-bg, #fff);
+    box-shadow: var(--tb-chip-shadow, 0 2px 8px rgba(0,0,0,.18));
+  }
+  body[data-poster-orientation="portrait"] .section { padding: 22pt; }
+  body[data-poster-style="simple"] .section { padding: 24pt 18pt 16pt; }
+  body[data-poster-style="left-bar"] .section { padding: 22pt 22pt 22pt 28pt; }
+  body[data-poster-style="legend-frame"] .section { padding: 40pt 22pt 22pt; }
+  body[data-poster-style="framed"] .section h2 {
+    margin-left: -22pt; margin-right: -22pt; padding-left: 22pt; padding-right: 22pt;
+  }
   </style>
 </head>
 <body>
@@ -1160,7 +1216,7 @@
         <p>{{PROBLEM}}</p>
       </div>
       <!-- Non-bottom section: size to content (no `.grow`). -->
-      <div class="section grow" data-section="motivation">
+      <div class="section" data-section="motivation">
         <h2>Motivation <button class="listen-btn" data-section="motivation">Listen</button></h2>
         <ul>
           <li>{{MOTIVATION_1}}</li>
@@ -1221,7 +1277,7 @@
           <li>{{DATASET_2}}</li>
         </ul>
       </div>
-      <div class="section grow" data-section="key-result">
+      <div class="section" data-section="key-result">
         <h2>Key Results <button class="listen-btn" data-section="key-result">Listen</button></h2>
         <table class="results">
           <tr><th>Method</th><th>Metric</th></tr>

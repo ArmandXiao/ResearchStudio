@@ -84,6 +84,16 @@ prints exactly how many were dropped — omit for full recall):
 python "$SEARCH" --query "<QUERY>" --start-year 2024 --end-year 2026 --min-score 2
 ```
 
+**Always pass `--json`.** Step 1.5 runs on every search and judges relevance
+from abstracts, which are never printed to stdout — this file is the only
+place they exist. It is also the unfiltered record the user can fall back to
+if the filter dropped something they wanted:
+
+```bash
+python "$SEARCH" --query "<QUERY>" --start-year 2024 --end-year 2026 \
+    --json /tmp/paper_search_results.json
+```
+
 Legacy per-source view (no dedup, no ranking — raw connector output):
 
 ```bash
@@ -161,17 +171,17 @@ already deduped and sorted by relevance), then the Model Knowledge section,
 then a summary. With `--raw`, fall back to per-source groups in this order:
 Semantic Scholar, OpenAlex, arXiv, OpenReview, Crossref, DBLP, Model Knowledge.
 
-Why full recall matters: users invoking this skill are doing literature reviews,
-related-work surveys, or prior-art checks. The value comes from seeing the
-complete set of hits — a missed paper can mean a missed citation or a
-duplicated research effort. Summaries are meant to *augment* the full tables,
-not replace them, so don't collapse results into a digest "to save space."
-The user can skim; they can't un-skip a paper they never saw.
+Recall still matters inside the kept set: users invoking this skill are doing
+literature reviews, related-work surveys, or prior-art checks. Everything that
+survives Step 1.5 is displayed in full — summaries *augment* the tables, they
+never replace them, so don't collapse results into a digest "to save space."
+The only papers that may disappear are the ones Step 1.5 judged irrelevant
+against the user's own question, and only under its when-unsure-keep rule.
 
-### Step 1: Display ALL results
+### Step 1: Display all results that survive the filter
 
-Default (unified ranked view): display every unique paper in ONE markdown
-table, preserving the CLI's rank order. Prefix `[survey]` in the Title cell
+Default (unified ranked view): display every unique paper that Step 1.5 kept,
+in ONE markdown table, preserving the CLI's rank order. Prefix `[survey]` in the Title cell
 where tagged. Reproduce the CLI's per-source hit counts + merged-duplicates
 line above the table, and the drop count line when `--min-score` was used.
 
@@ -190,6 +200,47 @@ If a source returned 0 results, note it explicitly
 
 If errors occurred during search, they are printed to stderr by the script —
 surface them to the user, never hide them.
+
+### Step 1.5: Relevance filter (semantic, ALWAYS run)
+
+Lexical scores rank; they do not understand. They admit generic-word noise and
+they miss synonym-only matches — a paper on "IP protection for generative
+models" scores 0 against a "watermarking" query yet may be the closest prior
+art in the set. So read the abstracts and drop what does not belong.
+
+**When to run**: always, on every search, over every paper in the ranked set.
+
+**Which model**: your own — the model already running this skill. Do NOT hand
+this off to a cheaper/faster tier to save tokens. This is an open-ended intent
+judgment, not labelling against a fixed list: the boundary of "relevant" lives
+only in the user's question, and is nowhere written down. Cheaper tiers
+systematically misjudge neighbouring work as unrelated, and under a hard filter
+that error is invisible and unrecoverable.
+
+**How**:
+1. Re-run (or have run) the CLI with `--json <path>` and read that file. It
+   carries the abstract for each ranked record; stdout does not.
+2. For every paper, judge `relevant | irrelevant` against the USER'S ORIGINAL
+   QUESTION — not the rephrased search query, which is lossier than what the
+   user actually asked for. Base the judgment on title AND abstract; a paper
+   whose abstract you did not read cannot be judged `irrelevant`.
+3. **When unsure, `relevant`.** `irrelevant` is for papers that are clearly
+   about something else, not for papers you are not sure about. This is the
+   one rule that keeps a hard filter safe: the user never sees what you drop,
+   so the burden of proof sits on dropping, not on keeping.
+4. Drop every `irrelevant` paper from the displayed table.
+
+**How to present**: one table, filtered. Do not print the dropped papers, do
+not add a collapsed section for them. State the count on the hit-count line so
+the user knows the filter ran and by how much:
+
+```
+per-source hits: semantic_scholar=10, open_alex=10, arxiv=10 … · 22 unique (8 duplicates merged) · 5 filtered as irrelevant
+```
+
+If `--json` was written, say once that the unfiltered set is in that file. That
+is the recovery path if the filter took too much; it costs one line and it is
+the only way a user can audit a drop.
 
 ### Step 2: Summary of all searched results
 

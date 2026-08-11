@@ -11,6 +11,44 @@ Inputs (explicit paths):
 - `$RUN_DIR/phase3_collision/collision_hits.json` — mechanism-specific retrieval, TWO channels per hit's `collision_channel` field: `signature` (candidate's own vocabulary, recent window — contemporaneous scoop risk) and `alias` (other communities' names for the same mechanism, multi-year window — renamed-ancestor risk). Alias-channel hits are older by design; do NOT discount a threat for being 2-3 years old — a same-mechanism ancestor subsumes the candidate regardless of age. The file is pre-truncated by the orchestrator (per-channel relevance ranking, ≤120 hits/channel, zero-relevance noise dropped, `relevance_score` on each hit) so it is safe to read whole in chunks; the untruncated pool sits in the sibling `collision_hits.full.json` if a deeper forensic sweep is ever warranted.
 - `references/anti-patterns.md` — 3 reject-favored compositions with required mitigations.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▸ MARKDOWN SAFETY — applies to EVERY prose field below
+
+The renderer hands `$...$` to KaTeX. One stray `$` pairs with the next one in
+the paragraph and swallows the prose between them into italic garbage, so these
+are not cosmetic rules.
+
+1. An identifier keeps its underscore. `foo_bar` is code, NOT `foo_{bar}`, and
+   never goes inside `$`. Backtick it whole. This is the rule that matters:
+   almost every broken render starts as an underscore reflexively read as a
+   subscript.
+     WRONG  gradients disabled $(torch.no_{grad},$ model in eval mode)
+     RIGHT  gradients disabled (`torch.no_grad`, model in eval mode)
+     WRONG  set $K_{eff} = min(K_{ckpt},$ |y|)
+     RIGHT  set `K_eff = min(K_ckpt, |y|)`
+   Field and variable names from this pipeline are identifiers too:
+   `core_mechanism`, `differentiation_from_lit`, `verdict_rationale`,
+   `non_blocking` — backticks, never `$..._{...}$`.
+
+2. A literal dollar sign is `\$`. Currency in prose opens math otherwise.
+     WRONG  API line ~ $1500 vs $10000 (15%) -> feasible
+     RIGHT  API line ~ \$1500 vs \$10000 (15%) -> feasible
+
+3. Inside `$...$`: math tokens only. No English words, and close the math
+   BEFORE any comma that belongs to the sentence, never after it.
+     WRONG  ... at weight $lambda_{v},$ and take the step
+     RIGHT  ... at weight $\lambda_v$, and take the step
+
+4. To WRITE ABOUT LaTeX delimiters, backtick them. Never type a bare `$$`
+   inside a sentence.
+
+5. Display math stands alone in its own paragraph, at column 0, balanced.
+   Never mid-sentence.
+
+6. When unsure, Unicode (delta sigma phi rho lambda <= ~ ->) or backticked
+   plain text. Correct plain text always beats a red KaTeX error.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Output (JSON):
 
 {

@@ -179,6 +179,14 @@ def _conv_math(run: str) -> str:
     t = re.sub(r'[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}',
                lambda m: r'\mathit{' + m.group(0).replace('_', '\x00') + '}', t)
     t = re.sub(r'_(?!\{)([A-Za-z0-9]+)', r'_{\1}', t)   # z_ab -> z_{ab}, leave z_{..} alone
+    # `hat_a_{j,L}` used to come out as `hat_{a}_{j,L}` — a double subscript, which is a
+    # hard KaTeX/xelatex error rather than merely ugly. Fold consecutive subscript groups
+    # into one so the expression still typesets.
+    while True:
+        _folded = re.sub(r'_\{([^{}]*)\}_\{([^{}]*)\}', r'_{\1,\2}', t)
+        if _folded == t:
+            break
+        t = _folded
     t = re.sub(r'\^(?!\{)([A-Za-z0-9]+)', r'^{\1}', t)
     for k, v in _MATH_UNICODE.items():
         t = t.replace(k, v + ' ')                        # trailing space terminates control words
@@ -193,6 +201,21 @@ def _classify(tok: str) -> str:
         return 'STRONG'
     if '^' in tok or (tok.startswith('{') and tok.endswith('}')):
         return 'STRONG'
+    # A colon-joined or dotted token is a code identifier / reference id, never math:
+    # `user_ref:arxiv_id:2606.32026` and `torch.no_grad` used to reach the subscript
+    # pass below and come out as $user_{ref}:arxiv_{id}$ — an underscore alone is not
+    # enough evidence of math when the token also carries code punctuation.
+    if ':' in tok or re.search(r'[A-Za-z]\.[A-Za-z]', tok):
+        return 'WORD'
+    # Two or more underscore-joined segments is a field/identifier name
+    # (`core_mechanism_steps`), never a variable with a subscript.
+    if re.search(r'[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}', tok):
+        return 'WORD'
+    # A single underscore joining two word-length halves is also a name, not a
+    # subscript: real math bases are one or two characters (K_eff, lambda_v, s_t),
+    # whereas core_mechanism / answer_margin are identifiers.
+    if re.search(r'[A-Za-z]{3,}_[A-Za-z]{3,}', tok):
+        return 'WORD'
     if re.search(r'[A-Za-z0-9\)\]\}]_', tok):            # underscore used as subscript
         return 'STRONG'
     if tok.lower().strip("()[],.") in _FUNCS:
@@ -206,8 +229,15 @@ def _classify(tok: str) -> str:
     return 'WORD'
 
 
+# A literal `$` in prose (currency, almost always) opens a math span in the markdown
+# card. tex mode already escapes it via latex_escape; md mode has to do the same.
+_MD_CURRENCY = re.compile(r'(?<!\\)\$(?=\d)')
+
+
 def _emit_text(s, mode: str) -> str:
-    return latex_escape(s) if mode == 'tex' else str(s)
+    if mode == 'tex':
+        return latex_escape(s)
+    return _MD_CURRENCY.sub(r'\\$', str(s))
 
 
 def _wrap_math(inner: str, mode: str) -> str:
@@ -224,6 +254,20 @@ def _flush_run(run: list, mode: str) -> str:
         lead.append(items.pop(0)[1])
     while items and items[-1][0] == 'SPACE':
         trail.insert(0, items.pop()[1])
+    # A comma or full stop that ends the run belongs to the sentence, not the formula:
+    # leaving it inside produced spans like `$\lambda_v,$` that read as math punctuation.
+    def _open_delims(seq):
+        s = ''.join(x for _, x in seq)
+        return (s.count('(') - s.count(')') > 0) or (s.count('[') - s.count(']') > 0)
+
+    while items and items[-1][1] and items[-1][1][-1] in ',.;' and not _open_delims(items):
+        kind, text = items[-1]
+        stripped = text[:-1]
+        trail.insert(0, text[-1])
+        if stripped:
+            items[-1] = (kind, stripped)
+            break
+        items.pop()
     body = _wrap_math(_conv_math(''.join(t for _, t in items)), mode)
     return (''.join(_emit_text(x, mode) for x in lead) + body
             + ''.join(_emit_text(x, mode) for x in trail))

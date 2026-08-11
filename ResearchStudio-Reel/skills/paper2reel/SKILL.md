@@ -182,8 +182,16 @@ Download delivery has two explicit modes:
   opening hides these online-only links.
 
 Both modes exclude `.claude/`, nested download directories, backups, and
-internal files. On-demand module entries are whitelisted and `all` is their
-deduplicated union. Use `on_demand` for Portal jobs and `materialized` for
+internal files. Poster, Video, and Blog keep their existing module-specific
+contents. New manifests mark `all_package_version: paper2reel.all.v2`; their
+All archive is instead a self-contained offline Reel containing `reel.html`,
+`content_alignment.json`, the Reel runtime under `assets/poster`,
+`assets/media`, `assets/slides`, `assets/blog`, `assets/ui`, and `assets/fonts`,
+plus the final Poster PDF/PPTX, Video MP4/PPTX, and EN/CN Blog DOCX files. It
+does not duplicate the root `poster.html` or `poster.png`, and it excludes
+build/cache trees and nested ZIPs. Historical manifests without
+`all_package_version` retain the original deduplicated-union behavior and
+remain downloadable. Use `on_demand` for Portal jobs and `materialized` for
 standalone offline bundles unless the caller explicitly chooses otherwise.
 
 ## Timeline-Backed Section Media

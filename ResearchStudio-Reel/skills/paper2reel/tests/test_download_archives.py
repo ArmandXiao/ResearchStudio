@@ -55,6 +55,8 @@ class ReelDownloadBuilderTests(unittest.TestCase):
     def make_shared_bundle(self, root: Path) -> Path:
         bundle = root / "paper"
         files = {
+            "reel.html": b"<html>reel</html>",
+            "content_alignment.json": b"{}",
             "poster.html": b"poster",
             "poster.png": b"png",
             "poster.pdf": b"pdf",
@@ -71,6 +73,18 @@ class ReelDownloadBuilderTests(unittest.TestCase):
             "assets/logos/logo.png": b"logo",
             "assets/qr/code.png": b"qr",
             "assets/captions/video.vtt": b"WEBVTT",
+            "assets/poster/poster.html": b"<html>embedded poster</html>",
+            "assets/poster/figure.png": b"embedded-poster-figure",
+            "assets/poster/assets/_pptx_build/dom.json": b"build-only",
+            "assets/poster/assets/meta/poster_qa.json": b"{}",
+            "assets/media/video.mp4": b"runtime-video",
+            "assets/media/captions/video.vtt": b"WEBVTT",
+            "assets/media/clips/intro.mp4": b"clip",
+            "assets/media/cache/render.bin": b"cache",
+            "assets/media/nested.zip": b"nested-zip",
+            "assets/slides/slide_01.png": b"slide",
+            "assets/blog/figures/figure_01.png": b"blog-figure",
+            "assets/ui/reel-wordmark.png": b"wordmark",
             "assets/downloads/old.zip": b"old-download",
             ".claude/scratch.txt": b"internal",
         }
@@ -135,12 +149,41 @@ class ReelDownloadBuilderTests(unittest.TestCase):
             self.assertNotIn("video.mp4", names["poster_final.zip"])
             self.assertNotIn("blog_en.docx", names["poster_final.zip"])
 
-            expected_all = (
-                names["poster_final.zip"]
-                | names["video_final.zip"]
-                | names["blog_final.zip"]
-            )
+            expected_all = {
+                "reel.html",
+                "content_alignment.json",
+                "poster.pdf",
+                "poster.pptx",
+                "video.mp4",
+                "video.pptx",
+                "blog_en.docx",
+                "blog_zh.docx",
+                "assets/poster/poster.html",
+                "assets/poster/figure.png",
+                "assets/media/video.mp4",
+                "assets/media/captions/video.vtt",
+                "assets/media/clips/intro.mp4",
+                "assets/slides/slide_01.png",
+                "assets/blog/figures/figure_01.png",
+                "assets/ui/reel-wordmark.png",
+                "assets/fonts/font.woff2",
+            }
             self.assertEqual(expected_all, names["all_final.zip"])
+            self.assertEqual(
+                reel_downloads.DOWNLOAD_ALL_PACKAGE_VERSION,
+                download_manifest["all_package_version"],
+            )
+            self.assertNotIn("poster.html", names["all_final.zip"])
+            self.assertNotIn("poster.png", names["all_final.zip"])
+            self.assertFalse(
+                any("_pptx_build" in name for name in names["all_final.zip"])
+            )
+            self.assertFalse(
+                any("cache" in name.lower() for name in names["all_final.zip"])
+            )
+            self.assertFalse(
+                any(name.lower().endswith(".zip") for name in names["all_final.zip"])
+            )
             for archive_names in names.values():
                 self.assertFalse(
                     any(name.startswith("assets/downloads/") for name in archive_names)
@@ -246,6 +289,10 @@ class ReelDownloadBuilderTests(unittest.TestCase):
             manifest = read_json(bundle / reel_downloads.DOWNLOAD_MANIFEST_PATH)
             self.assertEqual("on_demand", manifest["delivery"])
             self.assertEqual(
+                reel_downloads.DOWNLOAD_ALL_PACKAGE_VERSION,
+                manifest["all_package_version"],
+            )
+            self.assertEqual(
                 set(reel_downloads.ARCHIVE_ORDER),
                 set(manifest["archives"]),
             )
@@ -270,6 +317,12 @@ class ReelDownloadBuilderTests(unittest.TestCase):
             self.assertIn("assets/figures/figure1.png", poster_files)
             self.assertNotIn("video.mp4", poster_files)
             all_files = manifest["archives"]["all"]["files"]
+            all_names = {item["arcname"] for item in all_files}
+            self.assertIn("reel.html", all_names)
+            self.assertIn("assets/poster/poster.html", all_names)
+            self.assertIn("assets/media/video.mp4", all_names)
+            self.assertNotIn("poster.html", all_names)
+            self.assertNotIn("poster.png", all_names)
             self.assertEqual(
                 len(all_files),
                 len({item["arcname"] for item in all_files}),
@@ -286,6 +339,67 @@ class ReelDownloadBuilderTests(unittest.TestCase):
                     require_sources=True,
                 ),
             )
+
+    def test_historical_union_manifest_remains_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self.make_shared_bundle(Path(tmp))
+            manifest = reel_downloads.build_download_manifest(
+                bundle_root=bundle,
+                poster_source=bundle,
+                video_source=bundle,
+                blog_source=bundle,
+                delivery="on_demand",
+            )
+            manifest.pop("all_package_version")
+            union: dict[str, dict] = {}
+            for kind in ("poster", "video", "blog"):
+                for item in manifest["archives"][kind]["files"]:
+                    union.setdefault(item["arcname"], dict(item))
+            manifest["archives"]["all"]["files"] = [
+                union[name] for name in sorted(union)
+            ]
+
+            self.assertEqual(
+                [],
+                reel_downloads.validate_download_manifest(
+                    manifest,
+                    bundle_root=bundle,
+                    require_sources=True,
+                ),
+            )
+            _filename, files = reel_downloads.archive_files(
+                manifest,
+                "all",
+                bundle_root=bundle,
+            )
+            self.assertIn("poster.html", {arcname for _path, arcname in files})
+            self.assertNotIn("reel.html", {arcname for _path, arcname in files})
+
+    def test_v2_all_manifest_rejects_missing_runtime_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self.make_shared_bundle(Path(tmp))
+            manifest = reel_downloads.build_download_manifest(
+                bundle_root=bundle,
+                poster_source=bundle,
+                video_source=bundle,
+                blog_source=bundle,
+                delivery="on_demand",
+            )
+            manifest["archives"]["all"]["files"] = [
+                item
+                for item in manifest["archives"]["all"]["files"]
+                if item["arcname"] != "reel.html"
+            ]
+            codes = {
+                issue["code"]
+                for issue in reel_downloads.validate_download_manifest(
+                    manifest,
+                    bundle_root=bundle,
+                    require_sources=True,
+                )
+            }
+            self.assertIn("DOWNLOAD_ALL_REQUIRED_FILE_MISSING", codes)
+            self.assertIn("DOWNLOAD_ALL_PACKAGE_INVALID", codes)
 
 
 class ReelDownloadCheckerTests(unittest.TestCase):
@@ -557,6 +671,100 @@ class ReelPublishTests(unittest.TestCase):
                 reel_files["downloads_manifest"],
             )
             self.assertNotIn("downloads_dir", reel_files)
+
+    def test_materialized_publish_rebuilds_complete_all_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            target = ReelDownloadBuilderTests().make_shared_bundle(base)
+            staging = base / "staging"
+            write(staging / "reel.html", b"<html>new reel</html>")
+            write(staging / "content_alignment.json", b"{}")
+            write(
+                staging / "manifest.json",
+                json.dumps(
+                    {
+                        "schema_version": "paper2reel.v1",
+                        "local_open": {"supported": True},
+                    }
+                ).encode(),
+            )
+            write(staging / "assets" / "poster" / "poster.html", b"embedded")
+            write(staging / "assets" / "media" / "video.mp4", b"runtime")
+            write(
+                staging / "assets" / "media" / "captions" / "video.vtt",
+                b"WEBVTT",
+            )
+            write(staging / "assets" / "media" / "cache" / "render.bin", b"cache")
+            write(staging / "assets" / "slides" / "slide_01.png", b"slide")
+            write(staging / "assets" / "blog" / "figures" / "figure.png", b"figure")
+            write(staging / "assets" / "ui" / "reel-wordmark.png", b"wordmark")
+            builder.build_downloads(
+                outdir=staging,
+                poster_final_dir=target,
+                video_final_dir=target,
+                blog_final_dir=target,
+                download_mode="materialized",
+            )
+            staged_downloads = staging / "assets" / "downloads"
+            module_bytes_before = {
+                name: (staged_downloads / name).read_bytes()
+                for name in (
+                    "poster_final.zip",
+                    "video_final.zip",
+                    "blog_final.zip",
+                )
+            }
+            for module, name in (
+                ("poster", "poster_final.zip"),
+                ("video", "video_final.zip"),
+                ("blog", "blog_final.zip"),
+            ):
+                legacy_members = {
+                    relative.as_posix()
+                    for _path, relative in reel_downloads.selected_files(
+                        target,
+                        module=module,
+                    )
+                }
+                self.assertEqual(legacy_members, zip_names(staged_downloads / name))
+
+            bootstrap.sync_reel_into_bundle(
+                staging,
+                target,
+                download_mode="materialized",
+            )
+
+            manifest = read_json(target / reel_downloads.DOWNLOAD_MANIFEST_PATH)
+            self.assertEqual(
+                reel_downloads.DOWNLOAD_ALL_PACKAGE_VERSION,
+                manifest["all_package_version"],
+            )
+            self.assertEqual(
+                [],
+                reel_downloads.validate_download_manifest(
+                    manifest,
+                    bundle_root=target,
+                    require_sources=True,
+                ),
+            )
+            downloads = target / "assets" / "downloads"
+            all_names = zip_names(downloads / "all_final.zip")
+            self.assertEqual(
+                {item["arcname"] for item in manifest["archives"]["all"]["files"]},
+                all_names,
+            )
+            self.assertIn("reel.html", all_names)
+            self.assertIn("assets/media/video.mp4", all_names)
+            self.assertNotIn("poster.html", all_names)
+            self.assertNotIn("poster.png", all_names)
+            self.assertNotIn("assets/media/cache/render.bin", all_names)
+
+            for name, expected_bytes in module_bytes_before.items():
+                self.assertEqual(expected_bytes, (downloads / name).read_bytes())
+            poster_names = zip_names(downloads / "poster_final.zip")
+            self.assertIn("poster.html", poster_names)
+            self.assertIn("poster.png", poster_names)
+            self.assertIn("assets/_pptx_build/dom.json", poster_names)
 
 
 class ReelCopyNormalizationTests(unittest.TestCase):

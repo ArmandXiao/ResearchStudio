@@ -180,7 +180,10 @@ main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;fle
 .wall-lbl .wl-ref{font-size:11px;font-weight:700;color:var(--brand-2);vertical-align:super;margin:0 2px 0 1px}
 .wall-lbl .wl-ref:hover{text-decoration:underline}
 .wall-lbl .wl-count{font-size:11px;font-weight:700;color:var(--dim);background:var(--line);padding:2px 9px;border-radius:999px}
-.wall{display:flex;gap:16px;overflow-x:auto;scroll-behavior:smooth;padding:32px;scrollbar-width:none}
+/* No scroll-behavior:smooth here — the marquee writes scrollLeft every frame and CSS
+   smoothing turns each write into a competing animation. Arrow buttons pass
+   behavior:"smooth" explicitly to scrollBy(), so they are unaffected. */
+.wall{display:flex;gap:16px;overflow-x:auto;padding:32px;scrollbar-width:none}
 .wall::-webkit-scrollbar{display:none}
 .wall-wrap{position:relative}
 .cnav{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow-md);display:grid;place-items:center;cursor:pointer;z-index:30;color:var(--ink);transition:transform .15s,opacity .15s,background .15s;opacity:.9;padding:0}

@@ -94,7 +94,12 @@ def validate_alias_collateral_coverage(phase2_path: str, phase1_path: str) -> li
         want = _tokens(name)
         if not want:
             continue
-        if not any(len(want & got) >= MIN_SHARED for got in alias_tokens):
+        # A family whose name reduces to ONE distinctive token (`ddmin`, `McNemar's
+        # test`) can never share two, so a flat MIN_SHARED made those permanently
+        # uncoverable — including `ddmin`, the family this validator exists because a
+        # run missed. Require the lesser of MIN_SHARED and what the name actually has.
+        need = min(MIN_SHARED, len(want))
+        if not any(len(want & got) >= need for got in alias_tokens):
             uncovered.append(name)
 
     n_total = len(collateral)
@@ -106,7 +111,11 @@ def validate_alias_collateral_coverage(phase2_path: str, phase1_path: str) -> li
             out.append(f'... (+{len(names) - k} more)')
         return '; '.join(out)
 
-    if n_missing == n_total:
+    # With a single collateral node there is no list to ignore, and the measured
+    # failure was ignoring one (nine families named, zero queried). One unreachable
+    # family is exactly the case the partial branch already treats as legitimate, so
+    # it warns rather than blocking a run on a single judgment call.
+    if n_missing == n_total and n_total > 1:
         findings.append({
             "severity": "fail", "validator": V,
             "message": (

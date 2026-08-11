@@ -199,10 +199,27 @@ check('A4 no collateral nodes -> silent', f == [], str(f))
 # Generic-word overlap must NOT count as coverage. Without this, "cost-aware
 # agent evaluation" would "cover" every node whose name contains cost/agent —
 # a validator that can be satisfied by vocabulary noise trains people to ignore it.
+# Two nodes, so the verdict is the generic-token rule and not the single-node rule
+# tested in A7.
 f = _ac(['cost aware agent evaluation method'],
-        ['Cost-sensitive learning with test/attribute acquisition costs'])
+        ['Cost-sensitive learning with test/attribute acquisition costs',
+         'Screening designs for batched assays'])
 check('A5 generic-token overlap does not count as coverage',
       len(f) == 1 and f[0]['severity'] == 'fail', str(f))
+
+# A family whose name carries ONE distinctive token cannot share two, so a flat
+# threshold made `ddmin` and `McNemar's test` permanently uncoverable — `ddmin`
+# being the family whose omission this validator exists to catch.
+f = _ac(['ddmin delta debugging', 'mcnemar paired significance'],
+        ['ddmin', "McNemar's test"])
+check('A6 single-distinctive-token family can be covered',
+      len(f) == 1 and f[0]['severity'] == 'pass', str(f))
+
+# One node is not a list to ignore. The measured failure was nine named and zero
+# queried; a lone unreachable family is the case A3 already treats as legitimate.
+f = _ac(['unrelated vocabulary'], ['Combinatorial group testing'])
+check('A7 a single uncovered node warns rather than blocking',
+      len(f) == 1 and f[0]['severity'] == 'warn', str(f))
 
 # --- B: compute-budget parsing -------------------------------------------
 # Measured failure (i2r run `dllm-oracle`): intake said

@@ -1,22 +1,24 @@
 # Content Patterns Catalog
 
-A library of CSS widgets the LLM **must** use to break up wall-of-text monotony. All poster layouts — landscape `layouts/{full,half,3col}.html` **and** portrait `layouts_portrait/{full,half}.html` — ship these classes built-in (they land in every composed `poster.html`), so just use the markup below. **This catalog applies to portrait posters exactly as it does to landscape** — a portrait poster of plain `<p>`+`<ul>` sections is the same failure mode.
+A library of **12 semantic widget families** the LLM must use to break up wall-of-text monotony. All poster layouts — landscape `layouts/{full,half,3col}.html` **and** portrait `layouts_portrait/{full,half}.html` — ship these classes built-in (they land in every composed `poster.html`), so just use the markup below. **This catalog applies to portrait posters exactly as it does to landscape** — a portrait poster of plain `<p>`+`<ul>` sections is the same failure mode.
 
-> **When to read:** During Step 3 (template substitution) when filling section bodies. **Every section MUST use at least one pattern** — plain `<p>` + `<ul>` only across a whole section is the failure mode this catalog exists to prevent. Match the widget to the content's shape (see the "Shape of content it suits" column in the index).
+> **When to read:** During Step 3 (template substitution) when filling section bodies. **Every eligible visible card MUST use at least one pattern.** Gate H exempts only structural title/titlebar cards, scan cards, the Portrait Full `method-text` pseudo-section, Headline Numbers cards that already contain `.headline-hero`, and genuinely figure-only cards. Plain `<p>` + `<ul>` alone in any other card is the failure mode this catalog exists to prevent. Match the widget to the content's shape (see the "Shape of content it suits" column in the index).
 >
-> **Across the full poster:** use at least **5 distinct pattern types**. Using `.p-callout-soft` 9 times still reads as monotonous — adjacent sections should look visually different.
+> **Across the full poster:** use at least **5 distinct semantic families**. The four P16 timeline treatments count as one family, so restyling the same timeline cannot satisfy diversity by itself. Using `.p-callout-soft` 9 times still reads as monotonous — adjacent sections should look visually different.
 >
-> **Per-section cap:** 2 patterns. Don't stack 4 patterns in one section — that's just a different kind of clutter.
+> **Per-section authoring cap:** 2 patterns. This is a visual-quality rule, not a machine-enforced Gate H limit. Don't stack 4 patterns in one section — that's just a different kind of clutter.
 >
 > **Portrait (A0) note:** the narrow 2-column A0 body favors *vertical / compact* widgets — `p-steps`,
-> `p-timeline-cards`, `arch`, `p-chips`, `p-key-stat`, `p-callout-*`, `p-banner`, `p-table`. Avoid the *wide*
+> `p-timeline-cards`, `p-chips`, `p-key-stat`, `p-callout-*`, `p-banner`, `p-table`. Avoid the *wide*
 > ones (`p-vs` needs width > height) unless the column is genuinely wide (a
-> full-width band in `portrait_full`). The ≥5-distinct-types rule still holds — portrait is where sections most
+> full-width band in Portrait Full). The ≥5-distinct-families rule still holds — portrait is where sections most
 > easily collapse to plain bullets/tables, so it needs this catalog **more**, not less.
 
 ---
 
 ## Pattern Index
+
+Gate H recognizes the 12 rows below as 12 semantic families. P16a–d share the single `timeline` family.
 
 | # | Pattern | Shape of content it suits | CSS class |
 |---|---------|---------------------------|-----------|
@@ -301,15 +303,15 @@ A rough starting map for which patterns fit which section types. Not a rule — 
 | Headline Numbers | already uses `.headline-hero` (a custom variant of P5+P6); leave it | — |
 | Ablation Study | P12 (table with `tr.best`), P7 (vs — for a single before/after headline) | — |
 | Takeaway | P1 (callout-primary) for the mic-drop, P17 (banner) | P12 (table) |
-| Contribution (optional) | P10 (chips), or plain `<ol>` for numbered items | — |
+| Contribution (optional) | P10 (chips), or P8 (numbered-steps) for numbered items | — |
 | Dataset / Benchmark (optional) | P10 (chips for dataset names), P6 (stat-strip) | — |
 
 ## Don't do this
 
 - **Three of the same pattern in a row.** If Method, Key Results, and Takeaway all use P1 callout-primary, the poster looks like a Q1-OKR slide. Vary.
 - **A pattern that exceeds the section's height.** P16 timeline needs horizontal room; in a narrow `.col` it'll overflow. Check the section's column ratio before reaching for a wide pattern.
-- **Use a pattern just to fill space.** If the content is genuinely a single short paragraph, leave it as `<p>` — that's also a valid visual rhythm. Mixing prose paragraphs WITH patterns is what creates rhythm.
+- **Use a pattern just to fill space.** A short paragraph may remain as prose, but every eligible card still needs one content-matched widget elsewhere in that card. Mixing prose WITH meaningful patterns is what creates rhythm.
 
 ## Maintenance
 
-The actual CSS for all patterns lives in the `<style>` block of each layout, wrapped in a marked comment region (`/* ════ CONTENT PATTERNS ════ */`). To edit any pattern, search for that marker in `layouts/full.html` (the canonical version), edit, then mirror to the other layouts (`layouts/{half,3col}.html`, `layouts_portrait/{full,half}.html`). Changes here should be reflected in this doc.
+The actual CSS for all 12 semantic families lives in the `<style>` block of each layout, wrapped in a marked comment region (`/* ════ CONTENT PATTERNS ════ */`). To edit any pattern, search for that marker in `layouts/full.html` (the canonical version), edit, then mirror to the other layouts (`layouts/{half,3col}.html`, `layouts_portrait/{full,half}.html`). Keep the family selectors here aligned with `scripts/utils/polish.py` Gate H.

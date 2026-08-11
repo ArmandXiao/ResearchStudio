@@ -10,8 +10,11 @@ non-transparent coverage — a sparse wordmark counts less, so the packer grows 
 Two halves:
   - pure geometry (Mark, measure_mark, best_arrangement) — unit-testable, no browser.
   - bake(poster_path): open the rendered poster headless, measure each logo zone at the
-    TRUE canvas scale (viewport = 5760x3456 so the #poster-stage transform is identity),
-    pack, and rewrite the zone's markup into rows (+ a distinct QR row). Disk-to-disk:
+    TRUE canvas scale (viewport parsed from @page so the #poster-stage transform is identity),
+    pack, and rewrite the zone's markup into rows (+ a distinct QR row). Institution
+    auto-completion is manifest-gated: only approved entries from
+    ``assets/logos/logos.json`` may be injected. A missing manifest never triggers a
+    directory scan; already-explicit HTML sources are merely packed in place. Disk-to-disk:
     the self-contained poster.html never passes through a tool-call's output.
 
 Run after content substitution / the fill loop and BEFORE render_poster.py:
@@ -26,6 +29,10 @@ from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 
+SKILL = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SKILL / "scripts"))
+from utils import canvas as _canvas  # noqa: E402
+
 
 @dataclass(frozen=True)
 class Mark:
@@ -33,6 +40,9 @@ class Mark:
     ar: float        # bbox aspect ratio w/h (post-autotrim)
     opaque: float    # real opaque-pixel fraction of the bbox (0..1); qr ~ solid → ~1.0
     label: str = ""  # qr caption ("Paper"/"Code"); blank for logos
+
+
+_LOGO_EXTS = {".png", ".svg", ".jpg", ".jpeg", ".gif"}
 
 
 def measure_mark(path, kind="logo", label=""):
@@ -128,16 +138,61 @@ def best_arrangement(logos, qrs, zone_w, zone_h, pad=0.0, max_rows=3, gap_frac=0
 # ----- bake into poster.html ----------------------------------------------------
 # The header logo container across all landscape headers: v1/v2/v4 use `.logo-grid`,
 # v5 uses `.logo-block`, and v3 uses `.strip[data-section="logos"]` (its "equal-height
-# strip"). ALL must be listed here or that header's logos never get packed / auto-completed.
+# strip"). ALL must be listed here or that header's logos never get packed / allowlist-completed.
 _LOGO_SELS = [".titlebar .logo-grid", ".titlebar .logo-block", '.titlebar .strip[data-section="logos"]']
+
+# A header whose content substitution left every logo slot empty is commonly
+# hidden with ``:has(...)`` CSS.  In Portrait that also collapses the institution
+# grid track to zero width.  Such a zone cannot be measured by _ZONES_JS even
+# when ``includeEmpty`` is true because getBoundingClientRect() is 0 x 0.
+#
+# When approved institution marks exist in ``logos.json``, seed the first logo
+# zone with one real source before measuring.  That makes the CSS contract reveal
+# the zone (and, in Portrait, restores the institution track); the normal Python
+# allowlist completion below then adds every remaining approved mark and packs
+# them uniformly. With no approved source this helper is a strict no-op, so
+# genuinely empty headers stay hidden.
+_PRESEED_EMPTY_ZONE_JS = r"""async (arg)=>{
+  const src=(arg&&arg.src)||''; const sels=(arg&&arg.sels)||[];
+  if(!src||!sels.length) return false;
+  const zones=[...document.querySelectorAll(sels.join(','))];
+  const isQR=(im)=>!!im.closest('.qr-tile, .qr-block, .qr') ||
+    /assets\/qr\//.test(im.getAttribute('src')||'');
+  const real=(im)=>{const s=im.getAttribute('src')||'';
+    return !isQR(im)&&!!s&&!s.includes('{{');};
+  if(zones.some(z=>[...z.querySelectorAll('img')].some(real))) return false;
+  const z=zones[0]; if(!z) return false;
+  let im=[...z.querySelectorAll('img')].find(x=>!isQR(x));
+  if(!im){im=document.createElement('img'); z.appendChild(im);}
+  im.classList.add('logo'); im.alt=''; im.removeAttribute('onerror');
+  im.setAttribute('src',src);
+  if(!im.complete){await new Promise(resolve=>{
+    const done=()=>resolve();
+    im.addEventListener('load',done,{once:true});
+    im.addEventListener('error',done,{once:true});
+    setTimeout(done,1000);
+  });}
+  return true;
+}"""
 
 # Read each candidate zone: its box + the institution logo srcs + any QR marks (split
 # out). A QR is anything in a .qr-* wrapper OR whose src points at assets/qr/* — the
 # latter also catches QR <figure>s a PRIOR bake emitted, so re-baking stays idempotent
 # (a baked QR is never mis-counted as an institution logo).
-_ZONES_JS = r"""(sels)=>{const out=[];
+_ZONES_JS = r"""(arg)=>{const out=[];
+  const sels=Array.isArray(arg)?arg:arg.sels;
+  const includeEmpty=!Array.isArray(arg)&&!!arg.includeEmpty;
   sels.forEach(sel=>{document.querySelectorAll(sel).forEach((z,zi)=>{
     const r=z.getBoundingClientRect(); if(r.width<8||r.height<8) return;
+    // The packer inserts rows into the zone's CONTENT box.  Measuring the
+    // border box overstates the usable width/height whenever a header adds
+    // rail padding (Portrait pv2 is a common example), which can leave the
+    // last wide wordmark spilling into that padding.  Preserve W/H as the
+    // historical outer-box values, but expose the actual inner budget for the
+    // geometry search below.
+    const cs=getComputedStyle(z); const px=n=>parseFloat(n)||0;
+    const insetX=px(cs.paddingLeft)+px(cs.paddingRight)+px(cs.borderLeftWidth)+px(cs.borderRightWidth);
+    const insetY=px(cs.paddingTop)+px(cs.paddingBottom)+px(cs.borderTopWidth)+px(cs.borderBottomWidth);
     // IDEMPOTENCY: a prior bake collapses the zone to its packed-content height, so a
     // re-bake would then only ever fit ONE row. Remember the ORIGINAL available height on
     // the first bake and reuse it, so re-running fit_logos re-packs against the real header
@@ -154,13 +209,37 @@ _ZONES_JS = r"""(sels)=>{const out=[];
     const imgs=[...z.querySelectorAll('img')].filter(im=>im.getAttribute('src')&&!im.src.includes('{{'));
     const logos=imgs.filter(im=>!isQR(im));
     const qrImgs=imgs.filter(isQR);
-    if(!logos.length && !qrImgs.length) return;
+    // Keep a visible EMPTY zone only when paper2assets actually fetched logos.
+    // If placeholder substitution removed every <img>, bake() still needs a
+    // target into which it can auto-complete those manifest-approved marks.
+    if(!logos.length && !qrImgs.length && !includeEmpty) return;
     out.push({sel, idx:[...document.querySelectorAll(sel)].indexOf(z), W:r.width, H:H,
+      innerW:Math.max(1,r.width-insetX), innerH:Math.max(1,H-insetY),
       logos:logos.map(im=>({src:im.getAttribute('src'), natW:im.naturalWidth, natH:im.naturalHeight})),
       qrs:qrImgs.map(im=>{const fig=im.closest('figure, .qr-tile, .qr');
         const lb=fig?(fig.querySelector('figcaption, .qr-lbl, .qr-label, span')||{}).textContent:'';
         return {src:im.getAttribute('src'), label:(lb||'').trim()};})});
   });}); return out;}"""
+
+# When a valid manifest exists it is authoritative for institution resources,
+# including sources already present in poster.html. Remove institution images
+# absent from its approved allowlist before measuring. QR images and the
+# independently-owned conference mark are deliberately outside this gate. With
+# no manifest this script is not run: explicit HTML references remain, but no
+# directory resource is discovered or injected.
+_FILTER_UNAPPROVED_LOGOS_JS = r"""(arg)=>{const allowed=new Set(arg.allowed||[]); let removed=0;
+  const norm=(s)=>{try{s=decodeURIComponent((s||'').split('?')[0].split('#')[0]);}catch(e){}
+    return s.replace(/\\/g,'/').replace(/^\.\//,'').replace(/^\//,'');};
+  const isQR=(im)=>!!im.closest('.qr-tile, .qr-block, .qr') ||
+    /assets\/qr\//.test(im.getAttribute('src')||'');
+  const isVenue=(im)=>!!im.closest('.chip.conf') ||
+    /(^|\/)assets\/logos\/_venue\.png$/i.test(norm(im.getAttribute('src')||''));
+  document.querySelectorAll((arg.sels||[]).join(',')).forEach(z=>{
+    [...z.querySelectorAll('img')].forEach(im=>{const src=im.getAttribute('src')||'';
+      if(!src||src.includes('{{')||isQR(im)||isVenue(im)||allowed.has(norm(src))) return;
+      const chip=im.closest('.chip:not(.conf)'); im.remove();
+      if(chip&&!chip.querySelector('img')) chip.remove(); removed++;});});
+  return removed;}"""
 
 # Move relocated header QR marks into the standalone Scan-to-Read section (Paper + Code
 # tiles). Used for v1-v4 headers, which carry NO titlebar QR — the QR always lives here.
@@ -249,6 +328,73 @@ def _load_qr_labels(base: Path) -> dict:
     return labels
 
 
+def _manifest_logo_is_approved(entry: dict) -> bool:
+    """Return whether one ``logos.json`` entry is eligible downstream.
+
+    Current paper2assets manifests write both ``approved: true`` and
+    ``decision: \"approved\"``. Historical manifests predate those fields and
+    put only accepted resources in ``logos[]``; entries with no approval fields
+    therefore remain compatible. Any explicit negative or non-approved decision
+    wins, including a failed nested quality verdict.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if "approved" in entry and entry.get("approved") is not True:
+        return False
+    if "decision" in entry and str(entry.get("decision", "")).lower() != "approved":
+        return False
+    if "status" in entry and str(entry.get("status", "")).lower() != "approved":
+        return False
+    quality = entry.get("quality")
+    if (isinstance(quality, dict) and "accepted" in quality
+            and quality.get("accepted") is not True):
+        return False
+    return True
+
+
+def _load_approved_logo_paths(base: Path) -> tuple[bool, list[Path]]:
+    """Load the institution-logo allowlist from ``assets/logos/logos.json``.
+
+    Returns ``(manifest_present, paths)``. Missing manifests deliberately yield
+    ``(False, [])`` so callers preserve explicit HTML sources without
+    auto-completing from the directory. A present but invalid manifest yields
+    ``(True, [])`` and therefore approves nothing. Paths must resolve to real
+    supported files inside this bundle's ``assets/logos`` directory; traversal,
+    stale entries, and the separately-owned ``_venue.png`` are ignored.
+    """
+    logo_dir = (base / "assets" / "logos").resolve()
+    manifest_path = logo_dir / "logos.json"
+    if not manifest_path.is_file():
+        return False, []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return True, []
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("logos"), list):
+        return True, []
+
+    approved: list[Path] = []
+    seen: set[Path] = set()
+    for entry in manifest["logos"]:
+        if not _manifest_logo_is_approved(entry):
+            continue
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        candidate = (base / raw_path).resolve()
+        try:
+            candidate.relative_to(logo_dir)
+        except ValueError:
+            continue
+        if (candidate.name == "_venue.png"
+                or candidate.suffix.lower() not in _LOGO_EXTS
+                or not candidate.is_file() or candidate in seen):
+            continue
+        seen.add(candidate)
+        approved.append(candidate)
+    return True, approved
+
+
 # Final deterministic pass: caption EVERY QR tile from the make_qr manifest, keyed by the
 # QR image's filename — so a tile showing qr/paper.png is captioned "Project" when that's
 # what the URL is, not the template's hardcoded "Paper". Covers v5 header <figure>s, packed
@@ -281,20 +427,17 @@ def bake(poster_path, max_rows=3, pad_frac=0.06):
     from playwright.sync_api import sync_playwright
     poster = Path(poster_path).resolve()
     base = poster.parent
+    resolved_canvas = _canvas.resolve_canvas(poster, None, label="[fit_logos]")
+    if not resolved_canvas:
+        raise ValueError(f"cannot resolve @page canvas from {poster}")
+    _, viewport = resolved_canvas
     qr_labels = _load_qr_labels(base)
-    # Every institution logo fetched to disk (excluding the venue mark + QR). The model
-    # fills only a handful of {{LOGO_N}} slots and drops institutes when there are more
-    # than the header's slots — so we AUTO-COMPLETE the header with any of these that the
-    # model didn't place, deterministically. Sorted for stable ordering across renders.
-    _logo_dir = base / "assets" / "logos"
-    disk_logos = sorted(
-        (p for p in _logo_dir.glob("*")
-         if p.suffix.lower() in (".png", ".svg", ".jpg", ".jpeg") and p.name != "_venue.png"),
-        key=lambda p: p.name,
-    ) if _logo_dir.is_dir() else []
+    manifest_present, approved_logos = _load_approved_logo_paths(base)
+    approved_srcs = [p.relative_to(base).as_posix() for p in approved_logos]
     with sync_playwright() as p:
         br = p.chromium.launch(executable_path=p.chromium.executable_path, args=["--no-sandbox"])
-        pg = br.new_page(viewport={"width": 5760, "height": 3456}, device_scale_factor=1)
+        pg = br.new_page(viewport={"width": viewport[0], "height": viewport[1]},
+                         device_scale_factor=1)
         pg.emulate_media(media="print")   # match render_poster.py's layout: the header/logo
                                           # zone sizes differently under screen vs print media,
                                           # so measure the SAME layout the final PDF/PNG uses.
@@ -319,11 +462,30 @@ def bake(poster_path, max_rows=3, pad_frac=0.06):
               if(!im){im=document.createElement('img'); im.alt=''; chip.insertBefore(im, chip.firstChild);}
               im.removeAttribute('onerror'); im.setAttribute('src','assets/logos/_venue.png');}""")
             pg.wait_for_timeout(150)
-        zones = pg.evaluate(_ZONES_JS, _LOGO_SELS)
-        is_v5 = pg.evaluate("""()=>!!document.querySelector('.titlebar[data-header="v5"]')""")
+        if manifest_present:
+            pg.evaluate(
+                _FILTER_UNAPPROVED_LOGOS_JS,
+                {"sels": _LOGO_SELS, "allowed": approved_srcs},
+            )
+            pg.wait_for_timeout(50)
+        if approved_logos:
+            seeded = pg.evaluate(
+                _PRESEED_EMPTY_ZONE_JS,
+                {"sels": _LOGO_SELS,
+                 "src": approved_srcs[0]},
+            )
+            if seeded:
+                pg.wait_for_timeout(150)
+        zones = pg.evaluate(
+            _ZONES_JS, {"sels": _LOGO_SELS, "includeEmpty": bool(approved_logos)}
+        )
+        # Landscape v5 and every Portrait pv* header intentionally own their QR
+        # tiles. Only Landscape v1-v4 relocate header QRs into Scan-to-Read.
+        keeps_header_qr = pg.evaluate("""()=>{const h=document.querySelector('.titlebar[data-header]');
+          const v=(h&&h.getAttribute('data-header'))||''; return v==='v5'||v.startsWith('pv');}""")
         relocate_qrs = []          # header QR pulled out of v1-v4 titlebars -> Scan-to-Read
         baked = []
-        logos_completed = False    # inject missing disk logos into the first logo zone only
+        logos_completed = False    # inject missing approved logos into the first logo zone only
         for z in zones:
             logos, srcs = [], []
             for lg in z["logos"]:
@@ -339,28 +501,33 @@ def bake(poster_path, max_rows=3, pad_frac=0.06):
                 opaque = measure_mark(fp).opaque if fp else 1.0
                 logos.append(Mark("logo", ar, opaque))
                 srcs.append(s)
-            # AUTO-COMPLETE: every fetched institute logo on disk MUST appear — the model
-            # under-fills the header's slots and silently drops institutes when there are
-            # more than it placed (the "8 fetched, only 6 shown" bug). Inject any disk logo
-            # not already placed into this (first, header) logo zone, then pack them all.
-            if disk_logos and not logos_completed and logos:
-                placed = {s.rsplit("/", 1)[-1] for s in srcs}
-                for lf in disk_logos:
-                    if lf.name in placed:
+            # AUTO-COMPLETE only from paper2assets' approved manifest. Orphaned
+            # covers, stale legacy marks, and rejected images may remain on disk,
+            # but never enter the poster merely because of their extension.
+            if approved_logos and not logos_completed:
+                placed = {
+                    s.split("?", 1)[0].split("#", 1)[0].lstrip("./")
+                    for s in srcs
+                }
+                for lf, rel in zip(approved_logos, approved_srcs):
+                    if rel in placed:
                         continue
                     m = measure_mark(str(lf))
                     logos.append(Mark("logo", m.ar, m.opaque))
-                    srcs.append(f"assets/logos/{lf.name}")
+                    srcs.append(rel)
                 logos_completed = True
             qr_src = [(q["src"], q["label"]) for q in z["qrs"] if q["src"] and "{{" not in q["src"]]
-            if qr_src and not is_v5:
+            if qr_src and not keeps_header_qr:
                 # v1-v4 carry NO titlebar QR: pull any QR out of the header and re-home it
                 # in the standalone Scan-to-Read section; the header then packs logos only.
                 relocate_qrs.extend({"src": s, "label": lb} for s, lb in qr_src)
                 qr_src = []
             qrs = [Mark("qr", 1.0, 1.0, lb) for _, lb in qr_src]
-            pad = min(z["W"], z["H"]) * pad_frac
-            b = best_arrangement(logos, qrs, z["W"], z["H"], pad=pad, max_rows=max_rows)
+            usable_w = z.get("innerW", z["W"])
+            usable_h = z.get("innerH", z["H"])
+            pad = min(usable_w, usable_h) * pad_frac
+            b = best_arrangement(logos, qrs, usable_w, usable_h,
+                                 pad=pad, max_rows=max_rows)
             id2i = {id(m): i for i, m in enumerate(logos)}
             spec_rows = []
             for r, h in zip(b["rows"], b["row_heights"]):

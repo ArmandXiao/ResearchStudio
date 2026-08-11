@@ -112,11 +112,14 @@ for sec in DROP_SECTIONS:
     html = re.sub(rf'"{re.escape(sec)}"\s*,?\s*', "", html)   # best-effort PLAYLIST id removal
 
 # --- 3. substitute ---
-missing = [k for k in SUBS if k not in html]
-if missing:
-    sys.exit(f"placeholder(s) not in template (typo, or the section was dropped?): {missing}")
+# Layout/header variants intentionally expose different optional slots. For
+# example Portrait headers have four logo placeholders while Landscape headers
+# can have six, and some layouts omit a section entirely. Substitute the
+# intersection and let the final leftover gate catch the dangerous direction:
+# a placeholder present in the chosen template but missing from SUBS.
 for token, value in SUBS.items():
-    html = html.replace(token, value)
+    if token in html:
+        html = html.replace(token, value)
 
 # --- 4. sanity: no {{...}} may survive (fill it or drop its section) ---
 leftover = sorted(set(re.findall(r"\{\{[A-Z0-9_]+\}\}", html)))

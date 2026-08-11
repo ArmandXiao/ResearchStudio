@@ -15,7 +15,7 @@ Layered visual polish for the rendered `poster.html` so it reads from a few mete
 
 - Page background: off-white `#fafaf7`. Section cards: pure `#ffffff`, **1.5px theme-accent border** (thicker 5px on the left chip), 8px border-radius. All cards share one border color.
 - `<h2>` has **no background fill**. The text uses the theme accent color; the divider beneath is a 2px line in the accent at ~30% alpha (`color-mix(in srgb, var(--accent) 30%, transparent)`).
-- The **theme color** (one of 5 deep-academic themes, applied deterministically by `apply_theme.py`) owns the chrome: outer poster frame, title bar, Full Listen button, all card borders, all `<h2>` text + underlines.
+- The **theme color** (one of 9 academic themes, applied deterministically by `apply_theme.py`) owns the chrome: outer poster frame, title bar, Full Listen button, all card borders, all `<h2>` text + underlines.
 - The **per-section accent** is reserved for the small per-section Listen button only. Body text stays `#1a1a1a` — do not tint paragraphs or bullets per section.
 - The `{{HEADLINE_DELTA}}` callout uses the **theme color**. The `.stat` values and borders use **`--callout` red `#ae2622`** — the loudest content on the poster gets its own "this is the result" register, distinct from both chrome and inline body emphasis.
 - WCAG AA: heading text on the soft accent band must stay ≥4.5:1 with the default palette. If you introduce a new section color, verify both heading-on-band and chip-on-white pass.

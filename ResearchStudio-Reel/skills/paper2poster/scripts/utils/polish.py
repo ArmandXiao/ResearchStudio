@@ -31,6 +31,11 @@ Three gates the hard alignment gate cannot see:
     to ~0, and ``CARD/TRAILING`` skips space-distributing cards outright. Neither sees a
     ``justify-content: center`` card, whose voids sit above and below its
     children rather than between them.
+  - **Gate H: content-pattern diversity.** Every normal content section
+    should contain at least one supported ``p-*`` widget, and a poster should
+    use at least five distinct widget families. Structural title, scan,
+    method-text, Headline Numbers hero, and figure-only sections are exempt
+    from the per-section requirement; they do not inflate the family count.
 
 Warns by default; ``--strict`` to exit non-zero. Hard-fails when the
 poster resolves no ``poster`` / ``column`` / ``card`` roles — first from
@@ -62,6 +67,7 @@ DEFAULT_FIG_MIN_RATIO = float(os.environ.get("POSTER_FIG_MIN_RATIO", "0.90"))
 DEFAULT_MAX_SPACE_BETWEEN_FILL = 0.05
 DEFAULT_MAX_CARD_TRAILING = 0.05
 DEFAULT_MAX_WIDOW_FRACTION = 0.20
+DEFAULT_MIN_WIDGET_FAMILIES = 5
 
 # Gate C (inner void): an oversized gap BETWEEN a card's stacked children --
 # below its last real block and above one pushed down by `margin-top: auto`
@@ -505,7 +511,119 @@ _POLISH_JS = r"""
     });
   });
 
-  return {figures, orphans, cols, cards, innerVoids, flexbr, widows};
+  // ---- 7) Content-pattern widget diversity ----
+  // Keep this list aligned with references/content_patterns.md. Exact root
+  // selectors are intentional: generic chrome such as `.section`, `.card`,
+  // `.callout`, `.stat`, or `.headline-hero` is not a catalog widget and
+  // must not make a text-only poster look diverse. The four P16 timeline
+  // treatments are one semantic family, so restyling the same timeline four
+  // ways cannot satisfy the five-family poster requirement by itself.
+  const widgetFamilies = [
+    {name: 'callout-primary', selector: '.p-callout-primary'},
+    {name: 'callout-soft', selector: '.p-callout-soft'},
+    {name: 'callout-bar', selector: '.p-callout-bar'},
+    {name: 'key-stat', selector: '.p-key-stat'},
+    {name: 'stat-strip', selector: '.p-stat-strip'},
+    {name: 'vs', selector: '.p-vs'},
+    {name: 'numbered-steps', selector: '.p-steps'},
+    {name: 'chips', selector: '.p-chips'},
+    {name: 'highlight-table', selector: '.p-table'},
+    {name: 'equation', selector: '.p-eq'},
+    {name: 'timeline', selector: [
+      '.p-timeline-railroad', '.p-timeline-cards',
+      '.p-timeline-pills', '.p-timeline-stepcards'
+    ].join(', ')},
+    {name: 'banner', selector: '.p-banner'},
+  ];
+  const isVisibleWidget = (el) => {
+    // A widget can have a non-zero own box while an ancestor makes it
+    // unpaintable (notably opacity:0 and content-visibility:hidden). Walk to
+    // the poster root so hidden template alternatives never inflate Gate H.
+    for (let node = el; node && node.nodeType === Node.ELEMENT_NODE;
+         node = node.parentElement) {
+      const cs = window.getComputedStyle(node);
+      if (cs.display === 'none' || cs.visibility === 'hidden'
+          || cs.visibility === 'collapse' || cs.contentVisibility === 'hidden'
+          || Number(cs.opacity) === 0) return false;
+    }
+    return Array.from(el.getClientRects()).some(r => r.width > 0 && r.height > 0);
+  };
+  const familiesIn = (root) => widgetFamilies
+    .filter(f => {
+      const candidates = Array.from(root.querySelectorAll(f.selector));
+      if (root.matches(f.selector)) candidates.unshift(root);
+      return candidates.some(isVisibleWidget);
+    })
+    .map(f => f.name);
+
+  const posterRoots = Array.from(
+    document.querySelectorAll('[data-measure-role="poster"]')
+  );
+  const posterFamilies = new Set();
+  posterRoots.forEach(root => familiesIn(root).forEach(f => posterFamilies.add(f)));
+
+  const isFigureOnly = (section) => {
+    const mediaSel = 'figure, picture, img, svg, canvas, video';
+    if (!section.querySelector(mediaSel)) return false;
+    const clone = section.cloneNode(true);
+    // Headings, narration controls, and captions are structural metadata.
+    // If no prose remains after removing them and the actual media, the card
+    // is a deliberate figure-only composition.
+    clone.querySelectorAll(
+      'h1, h2, h3, h4, h5, h6, button, audio, script, style, ' +
+      'figure, picture, img, svg, canvas, video, figcaption, .listen-btn'
+    ).forEach(el => el.remove());
+    return !(clone.textContent || '').trim();
+  };
+
+  const widgetlessSections = [];
+  const exemptSections = [];
+  document.querySelectorAll('[data-measure-role="card"]')
+    .forEach((section, cardIndex) => {
+      const cs = window.getComputedStyle(section);
+      if (cs.display === 'none' || cs.visibility === 'hidden'
+          || section.getClientRects().length === 0) return;
+      const familyNames = familiesIn(section);
+      if (familyNames.length) return;
+
+      const sectionId = (section.getAttribute('data-section') || '').trim();
+      const sectionKey = sectionId.toLowerCase();
+      let exemptReason = '';
+      if (sectionKey === 'title' || section.classList.contains('titlebar')) {
+        exemptReason = 'title';
+      } else if (sectionKey === 'method-text'
+                 || section.classList.contains('method-text')) {
+        exemptReason = 'method-text';
+      } else if (sectionKey === 'headline-numbers'
+                 && section.querySelector('.headline-hero')) {
+        exemptReason = 'headline-numbers-hero';
+      } else if (sectionKey === 'scan' || sectionKey === 'scan-to-read'
+                 || sectionKey.startsWith('scan-')) {
+        exemptReason = 'scan';
+      } else if (isFigureOnly(section)) {
+        exemptReason = 'figure-only';
+      }
+
+      const heading = section.querySelector('h1, h2, h3');
+      const label = sectionId
+        || ((heading && heading.textContent) || '').replace(/\s+/g, ' ').trim()
+        || `card-${cardIndex}`;
+      if (exemptReason) {
+        exemptSections.push({card_index: cardIndex, section: label,
+                             reason: exemptReason});
+      } else {
+        widgetlessSections.push({card_index: cardIndex, section: label});
+      }
+    });
+
+  const widgetDiversity = {
+    families: Array.from(posterFamilies).sort(),
+    widgetless_sections: widgetlessSections,
+    exempt_sections: exemptSections,
+  };
+
+  return {figures, orphans, cols, cards, innerVoids, flexbr, widows,
+          widgetDiversity};
 }
 """
 
@@ -588,6 +706,7 @@ def default_polish_args() -> argparse.Namespace:
         max_card_inner_void=DEFAULT_MAX_CARD_INNER_VOID,
         min_card_inner_void_px=DEFAULT_MIN_CARD_INNER_VOID_PX,
         max_widow_fraction=DEFAULT_MAX_WIDOW_FRACTION,
+        min_widget_families=DEFAULT_MIN_WIDGET_FAMILIES,
         strict=False,
     )
 
@@ -1049,6 +1168,34 @@ def report_polish(collected: dict, args: argparse.Namespace,
                 "from text.txt. NEVER invent values."
             )
 
+    # ---- Gate H: content-pattern widgets and poster-wide diversity ----
+    widget_data = data.get("widgetDiversity", {})
+    widget_families = widget_data.get("families", [])
+    min_widget_families = getattr(
+        args, "min_widget_families", DEFAULT_MIN_WIDGET_FAMILIES
+    )
+    if len(widget_families) < min_widget_families:
+        used = ", ".join(ascii_safe(str(f)) for f in widget_families)
+        warns.append(
+            "WIDGET/DIVERSITY: poster uses "
+            f"{len(widget_families)} distinct content-pattern family(s); "
+            f"at least {min_widget_families} are required to avoid a "
+            "monotonous page. "
+            f"Detected: {used or '(none)'}. Use supported patterns from "
+            "references/content_patterns.md; repeating one family in many "
+            "sections still counts once."
+        )
+    for section in widget_data.get("widgetless_sections", []):
+        label = ascii_safe(str(section.get("section") or "?"))
+        warns.append(
+            f"WIDGET/MISSING: section '{label}' has no supported "
+            "content-pattern widget. Add at least one pattern matched to "
+            "the content shape (for example p-callout-soft, p-key-stat, "
+            "p-steps, p-chips, p-table, p-eq, a p-timeline-* variant, or "
+            "p-banner). Plain paragraphs, lists, tables without .p-table, "
+            "and section/card chrome do not count."
+        )
+
     print(f"[polish] {ascii_safe(html_path.name)}")
     print(f"  figures checked     : {len(data.get('figures', []))}")
     print(f"  stat-like elements  : {len(data.get('orphans', []))}")
@@ -1057,6 +1204,9 @@ def report_polish(collected: dict, args: argparse.Namespace,
     print(f"  inner-void cards    : {len(data.get('innerVoids', []))}")
     print(f"  flex/<br> parents   : {len(data.get('flexbr', []))}")
     print(f"  widow candidates    : {len(data.get('widows', []))}")
+    print(f"  widget families     : {len(widget_families)}")
+    print(f"  widgetless sections : "
+          f"{len(widget_data.get('widgetless_sections', []))}")
     print(f"  warnings            : {len(warns)}")
     for w in warns:
         print(f"  WARN: {w}")

@@ -35,7 +35,16 @@ def _content_bbox(im):
         if arr.ndim != 3 or arr.shape[2] < 4:
             return None
         rgb, alpha = arr[..., :3], arr[..., 3]
-        content = (alpha > _ALPHA_MIN) & (rgb.min(axis=2) < _NEAR_WHITE)
+        # When the source has meaningful transparency, alpha defines artwork.
+        # Intersecting alpha with "non-white" erased white wordmarks and made
+        # their bbox look empty. Fully opaque rasters still use near-white as
+        # the removable canvas background.
+        has_transparency = bool((alpha < 250).mean() >= 0.005)
+        content = (
+            alpha > _ALPHA_MIN
+            if has_transparency
+            else rgb.min(axis=2) < _NEAR_WHITE
+        )
         if not content.any():
             return None
         ys, xs = content.nonzero()
@@ -45,16 +54,16 @@ def _content_bbox(im):
     # Pillow-only fallback: intersect the opaque bbox with the non-white bbox.
     try:
         from PIL import Image, ImageChops
-        alpha_bbox = im.split()[3].getbbox()
+        alpha = im.split()[3]
+        alpha_bbox = alpha.getbbox()
+        alpha_min, _ = alpha.getextrema()
         rgb = im.convert("RGB")
         diff = ImageChops.difference(rgb, Image.new("RGB", im.size, (255, 255, 255)))
         nonwhite = diff.convert("L").point(lambda p: 255 if p > (255 - _NEAR_WHITE) else 0)
         white_bbox = nonwhite.getbbox()
-        if alpha_bbox and white_bbox:
-            l = max(alpha_bbox[0], white_bbox[0]); t = max(alpha_bbox[1], white_bbox[1])
-            r = min(alpha_bbox[2], white_bbox[2]); b = min(alpha_bbox[3], white_bbox[3])
-            return (l, t, r, b) if (r > l and b > t) else None
-        return alpha_bbox or white_bbox
+        if alpha_min < 250:
+            return alpha_bbox
+        return white_bbox
     except Exception:
         return None
 

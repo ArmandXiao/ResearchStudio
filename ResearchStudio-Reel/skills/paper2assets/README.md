@@ -64,7 +64,7 @@ Re-running on an existing `<outdir>/` is safe: a Step-0 cache check reports and 
 scripts/
 ├── extract_pdf.py     # pdf → assets/meta/{text,captions,figures}.json + assets/figures/
 ├── crop_figure.py     # inspect / top-check / decaption / autotrim / box / split — figure cleanup
-├── fetch_logos.py     # spec → assets/logos/*.{png,svg} (Wikimedia Commons)
+├── fetch_logos.py     # spec → quality-gated assets/logos/* + authoritative logos.json
 ├── make_qr.py         # metadata → assets/qr/{paper,code}.png
 └── build_package.py   # paper_spec.md → manifest.json + assets/meta/{sections,narration}.json
 ```

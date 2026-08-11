@@ -17,8 +17,9 @@ Sourcing strategy (best-effort, never fabricates):
      `logo`/`wordmark`/`seal`/`crest`, scored so the wordmark/logo beats the
      seal and Commons beats non-free en.wikipedia uploads. Skip flags/photos/maps.
   4. Resolve to a full-resolution image URL, download to
-     `<outdir>/assets/logos/<slug>.png`, and verify the bytes are a PNG/SVG
-     before keeping. If anything fails for one institute, skip it (the
+     `<outdir>/assets/logos/<slug>.png`, decode it, and reject photos, covers,
+     blank/low-contrast marks, corrupt responses, and duplicate visuals before
+     keeping it. If anything fails for one institute, skip it (the
      `.logo-block:has(no logos)` CSS rule hides the slot gracefully).
 
 Usage:
@@ -41,6 +42,7 @@ import hashlib
 import json
 import re
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -50,6 +52,11 @@ _THIS_DIR = str(Path(__file__).resolve().parent)
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 from utils import layout  # noqa: E402
+from utils.logo_quality import (  # noqa: E402
+    fingerprints_match,
+    inspect_logo_bytes,
+    inspect_logo_path,
+)
 try:
     from utils.logo_trim import autotrim  # noqa: E402
 except Exception:  # best-effort: a missing trim util / dep degrades to a no-op
@@ -116,6 +123,37 @@ ALIASES = {
 def slugify(name: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", name.lower()).strip("-")
     return s or "logo"
+
+
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(?:corporation|corp\.?|incorporated|inc\.?|llc|ltd\.?|limited|gmbh)\b",
+    re.IGNORECASE,
+)
+
+
+def canonical_institution_key(name: str, resolved_title: str | None = None) -> str:
+    """Stable identity key shared by deterministic and web-fallback fetches.
+
+    Prefer the Wikipedia title that actually resolved.  Without one, walk the
+    same parent/alias candidates as ``fetch_logo_for`` so spelling variants,
+    departments, and aliases such as MSRA converge on the parent institution.
+    Legal company suffixes are presentation details and do not create a second
+    institution identity.
+    """
+    if resolved_title:
+        canonical = resolve_wikipedia_title(resolved_title)
+    else:
+        candidates = parent_candidates(name) if "parent_candidates" in globals() else [name]
+        canonical = ""
+        for candidate in candidates:
+            alias = ALIASES.get(candidate.strip().lower())
+            if alias:
+                canonical = alias
+                break
+        canonical = canonical or resolve_wikipedia_title(name)
+    canonical = _LEGAL_SUFFIX_RE.sub(" ", canonical)
+    canonical = re.sub(r"\s+", " ", canonical).strip(" ,.-")
+    return slugify(canonical)
 
 
 def fetch(url: str, timeout: float = 15.0) -> bytes:
@@ -521,7 +559,195 @@ def detect_ext(data: bytes) -> str:
     return ".png"  # fallback
 
 
-def download_named_logo(name: str, url: str, logos_dir: Path) -> dict | None:
+MANIFEST_VERSION = 2
+
+
+def _manifest_path(logos_dir: Path) -> Path:
+    return logos_dir / "logos.json"
+
+
+def _load_manifest(logos_dir: Path) -> dict:
+    path = _manifest_path(logos_dir)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        manifest = loaded if isinstance(loaded, dict) else {}
+    except (OSError, ValueError, TypeError):
+        manifest = {}
+    manifest.setdefault("version", MANIFEST_VERSION)
+    for key in ("logos", "missing", "rejected"):
+        if not isinstance(manifest.get(key), list):
+            manifest[key] = []
+    return manifest
+
+
+def _write_manifest(logos_dir: Path, manifest: dict) -> None:
+    """Atomically persist the authoritative accepted/rejected selection."""
+    manifest = dict(manifest)
+    manifest["version"] = MANIFEST_VERSION
+    destination = _manifest_path(logos_dir)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=logos_dir,
+            prefix=".logos-", suffix=".json.tmp", delete=False,
+        ) as handle:
+            json.dump(manifest, handle, indent=2)
+            handle.write("\n")
+            temporary = Path(handle.name)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+
+def _entry_keys(entry: dict) -> set[str]:
+    keys = {
+        str(key).strip()
+        for key in (entry.get("institution_keys") or [])
+        if str(key).strip()
+    }
+    if entry.get("institution_key"):
+        keys.add(str(entry["institution_key"]).strip())
+    if not keys:
+        for name in str(entry.get("name") or "").split(";"):
+            if name.strip():
+                keys.add(canonical_institution_key(name.strip()))
+    return keys
+
+
+def _entry_file(entry: dict, logos_dir: Path) -> Path | None:
+    """Resolve a manifest logo path without allowing traversal.
+
+    Manifest paths are bundle-relative (``assets/logos/foo.png``).  Resolving
+    them against ``logos_dir.parent`` produced ``assets/assets/logos`` and was
+    the reason duplicate files were never removed.  The filename is sufficient
+    because accepted institution marks are contractually direct children of
+    ``assets/logos``.
+    """
+    raw = str(entry.get("path") or "")
+    name = Path(raw).name
+    if not name or name in {".", "..", "logos.json", "_venue.png"}:
+        return None
+    candidate = (logos_dir / name).resolve()
+    try:
+        candidate.relative_to(logos_dir.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _delete_manifest_file(
+    entry: dict, logos_dir: Path, protected: set[Path] | None = None,
+) -> bool:
+    """Delete only a superseded manifest-owned file, never an orphan asset."""
+    path = _entry_file(entry, logos_dir)
+    protected = {p.resolve() for p in (protected or set())}
+    if path is None or path.resolve() in protected or not path.exists():
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _quality_payload(inspection) -> dict:
+    return inspection.to_dict()
+
+
+def _approved_entry(
+    name: str,
+    slug: str,
+    path: Path,
+    source: str,
+    inspection,
+    *,
+    resolved_title: str | None = None,
+) -> dict:
+    requested_key = canonical_institution_key(name)
+    institution_key = canonical_institution_key(name, resolved_title)
+    institution_keys = list(dict.fromkeys((institution_key, requested_key)))
+    return {
+        "name": name,
+        "institution_key": institution_key,
+        "institution_keys": institution_keys,
+        "slug": slug,
+        "path": f"{layout.LOGOS}/{path.name}",
+        "source": source,
+        "approved": True,
+        "decision": "approved",
+        "fingerprint": inspection.fingerprint,
+        "quality": _quality_payload(inspection),
+    }
+
+
+def _rejected_entry(
+    name: str, source: str, inspection, *, stage: str,
+    resolved_title: str | None = None,
+) -> dict:
+    return {
+        "name": name,
+        "institution_key": canonical_institution_key(name, resolved_title),
+        "source": source,
+        "stage": stage,
+        "approved": False,
+        "decision": "rejected",
+        "reason": inspection.reason,
+        "quality": _quality_payload(inspection),
+    }
+
+
+def _merge_rejected(previous: list[dict], new: list[dict]) -> list[dict]:
+    merged: dict[tuple[str, str, str], dict] = {}
+    for entry in [*previous, *new]:
+        if not isinstance(entry, dict):
+            continue
+        key = (
+            str(entry.get("institution_key") or ""),
+            str(entry.get("source") or ""),
+            str(entry.get("reason") or ""),
+        )
+        merged[key] = entry
+    return list(merged.values())
+
+
+def _entry_is_approved(entry: dict) -> bool:
+    """Keep historical accepted entries while honoring explicit rejections."""
+    if not isinstance(entry, dict):
+        return False
+    if "approved" in entry and entry.get("approved") is not True:
+        return False
+    if "decision" in entry and str(entry.get("decision", "")).lower() != "approved":
+        return False
+    quality = entry.get("quality")
+    if isinstance(quality, dict) and quality.get("accepted") is False:
+        return False
+    return True
+
+
+def _merge_entry_identity(keeper: dict, duplicate: dict) -> None:
+    """Fold display names and canonical institution identities into a keeper."""
+    names: list[str] = []
+    for entry in (keeper, duplicate):
+        for name in str(entry.get("name") or "").split(";"):
+            name = name.strip()
+            if name and name not in names:
+                names.append(name)
+    if names:
+        keeper["name"] = "; ".join(names)
+
+    keys: list[str] = []
+    for entry in (keeper, duplicate):
+        for key in _entry_keys(entry):
+            if key and key not in keys:
+                keys.append(key)
+    if keys:
+        keeper["institution_key"] = str(
+            keeper.get("institution_key") or keys[0]
+        )
+        keeper["institution_keys"] = keys
+
+
+def download_named_logo(
+    name: str, url: str, logos_dir: Path, rejected: list[dict] | None = None,
+) -> dict | None:
     """Download ONE logo from an explicit URL for the web-search fallback.
 
     Reuses the same pipeline as the Wikimedia path (detect ext → slug from the
@@ -534,8 +760,15 @@ def download_named_logo(name: str, url: str, logos_dir: Path) -> dict | None:
     except Exception as e:
         print(f"[fetch_logos] add-logo {name!r}: download failed ({url}): {e}", file=sys.stderr)
         return None
-    if not data or len(data) < 128:
-        print(f"[fetch_logos] add-logo {name!r}: empty/too-small file from {url}", file=sys.stderr)
+    inspection = inspect_logo_bytes(data, source=url)
+    if not inspection.accepted:
+        failure = _rejected_entry(name, url, inspection, stage="web-fallback")
+        if rejected is not None:
+            rejected.append(failure)
+        print(
+            f"[fetch_logos] add-logo {name!r}: rejected {inspection.reason} ({url})",
+            file=sys.stderr,
+        )
         return None
     ext = detect_ext(data)
     slug = slugify(name)
@@ -548,12 +781,18 @@ def download_named_logo(name: str, url: str, logos_dir: Path) -> dict | None:
         except Exception:
             pass
         out = tight
-    rel = f"{layout.LOGOS}/{out.name}"
-    print(f"[fetch_logos] add-logo {name!r} -> {rel}  ({out.stat().st_size} bytes, source={url})", file=sys.stderr)
-    return {"name": name, "slug": slug, "path": rel, "source": url}
+    info = _approved_entry(name, slug, out, url, inspection)
+    print(
+        f"[fetch_logos] add-logo {name!r} -> {info['path']}  "
+        f"({out.stat().st_size} bytes, source={url})",
+        file=sys.stderr,
+    )
+    return info
 
 
-def fetch_logo_for(name: str) -> dict | None:
+def fetch_logo_for(
+    name: str, rejected: list[dict] | None = None,
+) -> dict | None:
     """Fetch (don't yet write) the best logo for `name`.
 
     Tries a fallback chain of parent-institution candidates (see
@@ -639,22 +878,42 @@ def fetch_logo_for(name: str) -> dict | None:
         full_candidates = wd_urls + (thumb_to_full(src) if src else [])
         data = None
         chosen_url = None
+        chosen_inspection = None
         for full in full_candidates:
             try:
                 blob = fetch(full)
             except Exception:
                 continue
-            if not is_image(blob):
+            inspection = inspect_logo_bytes(blob, source=full)
+            if not inspection.accepted:
+                if rejected is not None:
+                    rejected.append(_rejected_entry(
+                        name, full, inspection, stage="wikimedia",
+                        resolved_title=title,
+                    ))
+                print(
+                    f"[fetch_logos] {name!r} via {title!r}: rejected "
+                    f"{inspection.reason} ({full})",
+                    file=sys.stderr,
+                )
                 continue
             data = blob
             chosen_url = full
+            chosen_inspection = inspection
             break
         if not data:
             print(f"[fetch_logos] {name!r} via {title!r}: all download candidates failed", file=sys.stderr)
             continue
         if title.strip().lower() != name.strip().lower():
             print(f"[fetch_logos] {name!r}: resolved via {title!r}", file=sys.stderr)
-        return {"name": name, "title": title, "source": chosen_url, "data": data}
+        return {
+            "name": name,
+            "title": title,
+            "source": chosen_url,
+            "data": data,
+            "inspection": chosen_inspection,
+            "institution_key": canonical_institution_key(name, title),
+        }
     print(f"[fetch_logos] {name!r}: no candidate produced a logo (tried {len(titles)})", file=sys.stderr)
     return None
 
@@ -694,65 +953,92 @@ def parse_names(arg: str | None, spec: Path | None) -> list[str]:
     return []
 
 
-def _dedupe_by_source(results: list[dict], logos_dir: Path) -> list[dict]:
+def _dedupe_by_source(
+    results: list[dict], logos_dir: Path, *, delete_duplicates: bool = True,
+) -> list[dict]:
     """Collapse manifest entries that resolved to the SAME logo so the poster
     titlebar renders one tile per visually-distinct mark.
 
-    Two-level dedup:
+    Three-level dedup:
       1. by `source` URL (cheapest; catches MSR + MSRA + Microsoft Research
          all hitting the same Wikipedia file).
-      2. by SHA-256 of the downloaded bytes (catches the edge case where two
-         institutes resolved via DIFFERENT URLs but Wikipedia served the same
-         file — happens when a redirect collapses old and new article names).
+      2. by perceptual fingerprint (catches the same mark encoded as PNG/JPEG
+         or downloaded at a different resolution).
+      3. by exact file hash when a legacy entry has no usable fingerprint.
 
     First-seen entry wins; later duplicates have their local file removed
     (the survivor's file stays). The survivor's `name` becomes a `;`-joined
     list of all institute names that shared the file, so downstream
     substitution can show 'A*STAR (CFAR / IHPC)' in alt-text or tooltips."""
-    import hashlib
-    seen_src: dict[str, dict] = {}     # source URL → keeper entry
-    seen_hash: dict[str, dict] = {}    # file hash  → keeper entry
+    seen_src: dict[str, dict] = {}
+    seen_hash: dict[str, dict] = {}
+    fingerprinted: list[dict] = []
     kept: list[dict] = []
 
     for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        file_path = _entry_file(entry, logos_dir)
+        fingerprint = str(entry.get("fingerprint") or "")
+        if not fingerprint and file_path is not None and file_path.is_file():
+            inspection = inspect_logo_path(
+                file_path, source=str(entry.get("source") or file_path),
+            )
+            if inspection.accepted:
+                fingerprint = inspection.fingerprint
+                entry["fingerprint"] = fingerprint
+                entry.setdefault("quality", _quality_payload(inspection))
+
         src = entry.get("source", "")
-        # Level 1: source URL dedup
-        if src and src in seen_src:
-            keeper = seen_src[src]
-            keeper["name"] = f"{keeper['name']}; {entry['name']}"
-            # remove the duplicate's downloaded file (keeper's file stays)
-            dup_path = logos_dir.parent / entry["path"]
-            dup_path.unlink(missing_ok=True)
-            print(f"[fetch_logos] dedup (same source): {entry['name']!r} "
-                  f"→ folded into {keeper['name'].split(';')[0]!r}",
-                  file=sys.stderr)
+        duplicate = seen_src.get(str(src)) if src else None
+        reason = "same source"
+        if duplicate is None and fingerprint:
+            duplicate = next(
+                (
+                    prior for prior in fingerprinted
+                    if fingerprints_match(
+                        fingerprint, str(prior.get("fingerprint") or "")
+                    )
+                ),
+                None,
+            )
+            reason = "same visual fingerprint"
+
+        file_hash = ""
+        if duplicate is None and file_path is not None and file_path.is_file():
+            try:
+                file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            except OSError:
+                file_hash = ""
+            if file_hash:
+                duplicate = seen_hash.get(file_hash)
+                reason = "same bytes"
+
+        if duplicate is not None:
+            original_name = entry.get("name", "")
+            _merge_entry_identity(duplicate, entry)
+            if delete_duplicates:
+                keeper_path = _entry_file(duplicate, logos_dir)
+                protected = {keeper_path} if keeper_path is not None else set()
+                _delete_manifest_file(entry, logos_dir, protected=protected)
+            print(
+                f"[fetch_logos] dedup ({reason}): {original_name!r} "
+                f"→ folded into {str(duplicate.get('name', '')).split(';')[0]!r}",
+                file=sys.stderr,
+            )
             continue
 
-        # Level 2: file hash dedup (different URL, same bytes)
-        file_path = logos_dir.parent / entry["path"]
-        if file_path.exists():
-            try:
-                h = hashlib.sha256(file_path.read_bytes()).hexdigest()
-            except OSError:
-                h = ""
-            if h and h in seen_hash:
-                keeper = seen_hash[h]
-                keeper["name"] = f"{keeper['name']}; {entry['name']}"
-                file_path.unlink(missing_ok=True)
-                print(f"[fetch_logos] dedup (same bytes): {entry['name']!r} "
-                      f"→ folded into {keeper['name'].split(';')[0]!r}",
-                      file=sys.stderr)
-                continue
-            if h:
-                seen_hash[h] = entry
-
         if src:
-            seen_src[src] = entry
+            seen_src[str(src)] = entry
+        if fingerprint:
+            fingerprinted.append(entry)
+        if file_hash:
+            seen_hash[file_hash] = entry
         kept.append(entry)
     return kept
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--outdir", required=True, type=Path, help="Poster outdir; logos/ is created inside it. (If you pass <outdir>/logos by mistake, the trailing /logos is auto-stripped with a warning — see Step 6 of paper2assets/SKILL.md.)")
     ap.add_argument("--names", help='Semicolon-separated institute names, e.g. "Microsoft Research Asia;UCSD;Tsinghua University"')
@@ -763,9 +1049,9 @@ def main() -> int:
     ap.add_argument("--add-logo", action="append", default=[], metavar='"Name=URL"',
                     help="Web-search FALLBACK: download ONE logo for an institute the "
                          "deterministic pass reported as missing. Format 'Name=URL'. "
-                         "Repeatable. Skips the Wikimedia pass entirely — just downloads, "
-                         "autotrims, slugs, and appends to assets/logos/.")
-    args = ap.parse_args()
+                         "Repeatable. Skips the Wikimedia pass, applies the same quality "
+                         "gate, and atomically merges accepted selections into logos.json.")
+    args = ap.parse_args(argv)
 
     # Defensive: if caller passed `<outdir>/logos` (a common SKILL.md
     # misreading — script appends /logos itself, so passing it ends up
@@ -788,21 +1074,81 @@ def main() -> int:
         args.outdir = stripped
 
     logos_dir = layout.logos_dir(args.outdir, create=True)
+    previous = _load_manifest(logos_dir)
 
-    # FALLBACK MODE: download explicit "Name=URL" logos (from the web-search
-    # fallback for institutes the Wikimedia pass missed) and exit.
+    # FALLBACK MODE: merge explicit web-search results into the authoritative
+    # manifest. Replacing one institution never discards unrelated entries or
+    # user-owned orphan files that merely happen to live beside the manifest.
     if args.add_logo:
-        added = []
+        added: list[dict] = []
+        new_rejected: list[dict] = []
         for spec in args.add_logo:
             if "=" not in spec:
                 print(f"[fetch_logos] --add-logo needs 'Name=URL', got {spec!r}", file=sys.stderr)
                 continue
             nm, url = spec.split("=", 1)
-            info = download_named_logo(nm.strip(), url.strip(), logos_dir)
+            info = download_named_logo(
+                nm.strip(), url.strip(), logos_dir, rejected=new_rejected,
+            )
             if info:
                 added.append(info)
         added = _dedupe_by_source(added, logos_dir)
-        print(json.dumps({"logos": added}, indent=2))
+
+        previous_accepted = [
+            dict(entry) for entry in previous["logos"]
+            if _entry_is_approved(entry)
+        ]
+        added_keys = (
+            set().union(*(_entry_keys(entry) for entry in added))
+            if added else set()
+        )
+        retained: list[dict] = []
+        superseded: list[dict] = []
+        for entry in previous_accepted:
+            if added_keys & _entry_keys(entry):
+                superseded.append(entry)
+            else:
+                retained.append(entry)
+
+        candidates = [*retained, *added]
+        merged = _dedupe_by_source(
+            candidates, logos_dir, delete_duplicates=False,
+        )
+        merged_paths = {
+            path.resolve()
+            for entry in merged
+            if (path := _entry_file(entry, logos_dir)) is not None
+        }
+        discarded = [
+            entry for entry in candidates
+            if (path := _entry_file(entry, logos_dir)) is not None
+            and path.resolve() not in merged_paths
+        ]
+        missing = [
+            name for name in previous["missing"]
+            if canonical_institution_key(str(name)) not in added_keys
+        ]
+        manifest = {
+            "version": MANIFEST_VERSION,
+            "logos": merged,
+            "missing": missing,
+            "rejected": _merge_rejected(previous["rejected"], new_rejected),
+        }
+        try:
+            _write_manifest(logos_dir, manifest)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fetch_logos] ERROR: could not write logos.json: {exc}", file=sys.stderr)
+            print(json.dumps(manifest, indent=2))
+            return 1
+
+        for entry in [*superseded, *discarded]:
+            _delete_manifest_file(entry, logos_dir, protected=merged_paths)
+        print(
+            f"[fetch_logos] manifest -> {layout.LOGOS}/logos.json "
+            f"({len(merged)} logo(s))",
+            file=sys.stderr,
+        )
+        print(json.dumps(manifest, indent=2))
         return 0 if added else 1
 
     names = parse_names(args.names, args.from_spec)
@@ -810,61 +1156,28 @@ def main() -> int:
         print("[fetch_logos] no institute names provided (use --names or --from-spec)", file=sys.stderr)
         return 2
 
-    # Three-stage dedup so two institutes that resolve to the same logo
-    # don't render two identical tiles in the titlebar:
-    #   (1) PRE-FETCH by resolved Wikipedia title -- catches the cheap case
-    #       (MSRA + "Microsoft Research Asia" both alias to "Microsoft
-    #       Research") and saves the HTTP round-trip.
-    #   (2) POST-FETCH by source URL -- catches two distinct titles whose
-    #       infoboxes link the same Commons file.
-    #   (3) POST-FETCH by image SHA-256 -- last-resort: distinct URLs that
-    #       happen to serve byte-identical files (rebrands, mirrors).
-    results = []
-    missing: list[str] = []             # institutes that produced NO logo (need web-search fallback)
-    seen_titles: dict[str, dict] = {}   # resolved title -> result
-    seen_urls: dict[str, dict] = {}     # chosen source URL -> result
-    seen_hashes: dict[str, dict] = {}   # sha256(data) -> result
-    for n in names:
-        pre_title = resolve_wikipedia_title(n)
-        if pre_title in seen_titles:
-            prior = seen_titles[pre_title]
-            print(f"[fetch_logos] {n!r}: deduped -- resolves to same Wikipedia title as {prior['name']!r} ({pre_title!r}); skipping", file=sys.stderr)
+    results: list[dict] = []
+    new_rejected: list[dict] = []
+    requested_keys = {canonical_institution_key(name) for name in names}
+    seen_requested: set[str] = set()
+    for name in names:
+        request_key = canonical_institution_key(name)
+        if request_key in seen_requested:
+            print(
+                f"[fetch_logos] {name!r}: deduped -- same canonical "
+                f"institution key {request_key!r}; skipping",
+                file=sys.stderr,
+            )
             continue
-        fetched = fetch_logo_for(n)
+        seen_requested.add(request_key)
+        fetched = fetch_logo_for(name, rejected=new_rejected)
         if not fetched:
-            missing.append(n)           # no Wikimedia logo -> fall back to web search (Step 6)
             continue
-        url = fetched["source"]
-        if url in seen_urls:
-            prior = seen_urls[url]
-            print(f"[fetch_logos] {n!r}: deduped -- same logo URL as {prior['name']!r} ({url}); skipping", file=sys.stderr)
-            continue
-        h = hashlib.sha256(fetched["data"]).hexdigest()
-        if h in seen_hashes:
-            prior = seen_hashes[h]
-            print(f"[fetch_logos] {n!r}: deduped -- byte-identical to {prior['name']!r} (sha256 {h[:12]}); skipping", file=sys.stderr)
-            continue
-        # Survived all three dedup gates -- write to disk.
-        # Slug is derived from the RESOLVED Wikipedia title (fetched["title"]),
-        # not the raw input name. Why: when the spec writes the institute
-        # differently across papers ("Microsoft Research Asia", "MSRA",
-        # "Microsoft Research, Shanghai, China", "Department of XX,
-        # Microsoft Research Asia"), parent_candidates / aliases all
-        # cascade to the same Wikipedia title — so the filename is
-        # canonical and downstream code can match the same logo across
-        # multiple papers from the same org. Without this, paper_a got
-        # `microsoft-research.png` while paper_b got
-        # `microsoft-research-shanghai-china.png` (slug overfit on the
-        # raw spec text including dept/location prefix).
+
         slug = slugify(fetched["title"])
         ext = detect_ext(fetched["data"])
         out = logos_dir / f"{slug}{ext}"
         out.write_bytes(fetched["data"])
-        # Autotrim: rasterize (SVG -> PNG) + crop the transparent/near-white border
-        # so the chip hugs the mark instead of floating in padding. Best-effort --
-        # the original file is kept on any failure. An SVG that rasterizes returns a
-        # tight <slug>.png; adopt it and drop the .svg so the header references the
-        # trimmed raster.
         tight = autotrim(out)
         if tight != out:
             try:
@@ -872,45 +1185,115 @@ def main() -> int:
             except Exception:
                 pass
             out = tight
-        rel = f"{layout.LOGOS}/{out.name}"
-        print(f"[fetch_logos] {n!r} -> {rel}  ({out.stat().st_size} bytes, source={url})", file=sys.stderr)
-        info = {"name": n, "slug": slug, "path": rel, "source": url}
+        info = _approved_entry(
+            name, slug, out, fetched["source"], fetched["inspection"],
+            resolved_title=fetched["title"],
+        )
+        print(
+            f"[fetch_logos] {name!r} -> {info['path']}  "
+            f"({out.stat().st_size} bytes, source={fetched['source']})",
+            file=sys.stderr,
+        )
         results.append(info)
-        seen_titles[pre_title] = info
-        seen_urls[url] = info
-        seen_hashes[h] = info
 
-    # Dedup: same source URL or same file bytes → one tile per visual logo.
     results = _dedupe_by_source(results, logos_dir)
 
-    # CHECKLIST — surface exactly which institutes still need a logo so the
-    # caller (SKILL.md Step 6) runs the web-search fallback on each one.
-    got = {r["name"] for r in results}
-    print(f"[fetch_logos] CHECKLIST: {len(got)}/{len(names)} institute(s) resolved via Wikimedia", file=sys.stderr)
-    for n in names:
-        mark = "✓" if n in got else ("·" if n not in missing else "✗")
-        print(f"[fetch_logos]   {mark} {n}", file=sys.stderr)
+    # A deterministic result replaces a prior fallback for the same canonical
+    # institution. If Wikimedia still misses, preserve a valid existing fallback
+    # selected for one of the current spec's institutes.
+    resolved_keys = (
+        set().union(*(_entry_keys(entry) for entry in results))
+        if results else set()
+    )
+    preserved: list[dict] = []
+    old_selected: list[dict] = []
+    for raw_entry in previous["logos"]:
+        if not _entry_is_approved(raw_entry):
+            continue
+        entry = dict(raw_entry)
+        keys = _entry_keys(entry)
+        if not keys & requested_keys:
+            continue
+        old_selected.append(entry)
+        if keys & resolved_keys:
+            continue
+        path = _entry_file(entry, logos_dir)
+        inspection = (
+            inspect_logo_path(
+                path, source=str(entry.get("source") or path),
+            )
+            if path is not None and path.is_file() else None
+        )
+        if inspection is None or not inspection.accepted:
+            if inspection is not None:
+                for display_name in str(entry.get("name") or "").split(";"):
+                    new_rejected.append(_rejected_entry(
+                        display_name.strip() or "unknown",
+                        str(entry.get("source") or entry.get("path") or ""),
+                        inspection,
+                        stage="existing-manifest",
+                    ))
+            continue
+        entry["approved"] = True
+        entry["decision"] = "approved"
+        entry["fingerprint"] = inspection.fingerprint
+        entry["quality"] = _quality_payload(inspection)
+        entry_keys = list(keys)
+        if entry_keys:
+            entry["institution_key"] = str(
+                entry.get("institution_key") or entry_keys[0]
+            )
+            entry["institution_keys"] = entry_keys
+        preserved.append(entry)
+
+    candidates = [*results, *preserved]
+    final_results = _dedupe_by_source(
+        candidates, logos_dir, delete_duplicates=False,
+    )
+    final_keys = (
+        set().union(*(_entry_keys(entry) for entry in final_results))
+        if final_results else set()
+    )
+    missing = [
+        name for name in names
+        if canonical_institution_key(name) not in final_keys
+    ]
+
+    resolved_count = len(names) - len(missing)
+    print(f"[fetch_logos] CHECKLIST: {resolved_count}/{len(names)} institute(s) resolved", file=sys.stderr)
+    for name in names:
+        mark = "✓" if canonical_institution_key(name) in final_keys else "✗"
+        print(f"[fetch_logos]   {mark} {name}", file=sys.stderr)
     if missing:
         print(f"[fetch_logos]   ✗ MISSING — WEB-SEARCH FALLBACK REQUIRED (Step 6): {', '.join(missing)}", file=sys.stderr)
 
-    # Persist the FULL manifest to disk as well as stdout. Callers sometimes
-    # pipe stdout through `tail`/`head` to save tokens, which silently drops
-    # early entries (e.g. the first institute's slug) -- the agent then invents a
-    # wrong logo filename (msra -> 'microsoft-research-asia.png') instead of the
-    # mapped slug ('microsoft'). A stable file lets the poster stage read the
-    # correct slug regardless of any stdout truncation.
-    manifest = {"logos": results, "missing": missing}
+    manifest = {
+        "version": MANIFEST_VERSION,
+        "logos": final_results,
+        "missing": missing,
+        "rejected": _merge_rejected(previous["rejected"], new_rejected),
+    }
     try:
-        (logos_dir / "logos.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
+        _write_manifest(logos_dir, manifest)
         print(f"[fetch_logos] manifest -> {layout.LOGOS}/logos.json "
-              f"({len(results)} logo(s))", file=sys.stderr)
+              f"({len(final_results)} logo(s))", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001
-        print(f"[fetch_logos] WARNING: could not write logos.json: {exc}", file=sys.stderr)
+        print(f"[fetch_logos] ERROR: could not write logos.json: {exc}", file=sys.stderr)
+        print(json.dumps(manifest, indent=2))
+        return 1
+
+    final_paths = {
+        path.resolve()
+        for entry in final_results
+        if (path := _entry_file(entry, logos_dir)) is not None
+    }
+    for entry in [*old_selected, *candidates]:
+        path = _entry_file(entry, logos_dir)
+        if path is not None and path.resolve() not in final_paths:
+            _delete_manifest_file(entry, logos_dir, protected=final_paths)
 
     print(json.dumps(manifest, indent=2))
-    return 0 if results else 1
+    return 0 if final_results else 1
 
 
 if __name__ == "__main__":

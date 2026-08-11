@@ -6,6 +6,7 @@ depends on, plus the orientation-specific style catalogs.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
@@ -513,10 +514,10 @@ def test_repeated_logo_bake_reuses_largest_measured_zone_height():
     ),
     ids=("landscape", "portrait"),
 )
-def test_disk_logo_preseed_reveals_hidden_zone_for_fitting(
+def test_approved_logo_preseed_reveals_hidden_zone_for_fitting(
     zone_class, selector, css,
 ):
-    """A real disk mark must reveal a CSS-hidden logo zone before measurement."""
+    """An approved mark must reveal a CSS-hidden logo zone before measurement."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -562,8 +563,8 @@ def test_disk_logo_preseed_reveals_hidden_zone_for_fitting(
             browser.close()
 
 
-def test_no_disk_logo_keeps_empty_logo_zone_hidden():
-    """The preseed helper is a no-op when disk discovery found no source."""
+def test_no_approved_logo_keeps_empty_logo_zone_hidden():
+    """The preseed helper is a no-op when no approved source was supplied."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -600,6 +601,91 @@ def test_no_disk_logo_keeps_empty_logo_zone_hidden():
             browser.close()
 
 
+def _write_test_svg(path: Path, width: int = 120, color: str = "navy") -> None:
+    path.write_text(
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' "
+        f"height='60'><rect width='100%' height='100%' fill='{color}'/></svg>",
+        encoding="utf-8",
+    )
+
+
+def test_logo_manifest_is_the_only_disk_autocomplete_allowlist(tmp_path):
+    logos = tmp_path / "assets" / "logos"
+    logos.mkdir(parents=True)
+    for name in ("approved.svg", "orphan-cover.svg", "explicitly-rejected.svg"):
+        _write_test_svg(logos / name)
+    (logos / "_venue.png").write_bytes(b"separately-owned-venue-fixture")
+    (logos / "logos.json").write_text(json.dumps({
+        "logos": [
+            {
+                "name": "Approved Institute",
+                "path": "assets/logos/approved.svg",
+                "approved": True,
+                "decision": "approved",
+                "quality": {"accepted": True},
+            },
+            {
+                "name": "Rejected Institute",
+                "path": "assets/logos/explicitly-rejected.svg",
+                "approved": False,
+                "decision": "rejected",
+            },
+            {
+                "name": "Venue is not an institution",
+                "path": "assets/logos/_venue.png",
+                "approved": True,
+                "decision": "approved",
+            },
+        ],
+        "rejected": [{
+            "name": "Campus cover",
+            "path": "assets/logos/orphan-cover.svg",
+            "reason": "cover_or_page_image",
+        }],
+    }), encoding="utf-8")
+
+    present, approved = fit_logos._load_approved_logo_paths(tmp_path)
+    assert present is True
+    assert [path.name for path in approved] == ["approved.svg"]
+
+
+def test_logo_manifest_honors_explicit_status_rejection():
+    assert fit_logos._manifest_logo_is_approved({"path": "legacy.png"}) is True
+    assert fit_logos._manifest_logo_is_approved({
+        "path": "rejected.png", "status": "rejected",
+    }) is False
+
+
+def test_missing_logo_manifest_fails_closed_for_disk_autocomplete(tmp_path):
+    logos = tmp_path / "assets" / "logos"
+    logos.mkdir(parents=True)
+    _write_test_svg(logos / "orphan-cover.svg")
+
+    present, approved = fit_logos._load_approved_logo_paths(tmp_path)
+    assert present is False
+    assert approved == []
+
+
+def test_legacy_logo_manifest_entries_remain_approved(tmp_path):
+    """Old manifests put only accepted entries in logos[] and had no verdict fields."""
+    logos = tmp_path / "assets" / "logos"
+    logos.mkdir(parents=True)
+    _write_test_svg(logos / "legacy-approved.svg")
+    (logos / "logos.json").write_text(json.dumps({
+        "logos": [{
+            "name": "Legacy Institute",
+            "slug": "legacy-institute",
+            "path": "assets/logos/legacy-approved.svg",
+            "source": "https://example.test/legacy-approved.svg",
+        }],
+        "missing": [],
+    }), encoding="utf-8")
+
+    present, approved = fit_logos._load_approved_logo_paths(tmp_path)
+    assert present is True
+    assert [path.name for path in approved] == ["legacy-approved.svg"]
+
+
 @pytest.mark.parametrize(
     ("canvas", "zone_class", "css"),
     (
@@ -631,10 +717,10 @@ def test_no_disk_logo_keeps_empty_logo_zone_hidden():
     ),
     ids=("landscape", "portrait"),
 )
-def test_bake_autocompletes_css_hidden_zone_from_disk(
+def test_bake_autocompletes_css_hidden_zone_from_manifest_allowlist(
     tmp_path, canvas, zone_class, css,
 ):
-    """The public bake path must discover and pack every on-disk institution mark."""
+    """The public bake path packs approved entries and ignores orphan covers."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -649,17 +735,36 @@ def test_bake_autocompletes_css_hidden_zone_from_disk(
 
     logos = tmp_path / "assets" / "logos"
     logos.mkdir(parents=True)
-    for name, width in (("inst-a.svg", 120), ("inst-b.svg", 180)):
-        (logos / name).write_text(
-            f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' "
-            "height='60'><rect width='100%' height='100%' fill='navy'/></svg>",
-            encoding="utf-8",
-        )
+    for name, width in (
+        ("inst-a.svg", 120), ("inst-b.svg", 180), ("orphan-cover.svg", 240),
+    ):
+        _write_test_svg(logos / name, width)
+    (logos / "logos.json").write_text(json.dumps({
+        "logos": [
+            {
+                "name": "Institute A",
+                "path": "assets/logos/inst-a.svg",
+                "approved": True,
+                "decision": "approved",
+                "quality": {"accepted": True},
+            },
+            {
+                # Historical accepted entry: no approval fields.
+                "name": "Institute B",
+                "path": "assets/logos/inst-b.svg",
+            },
+        ],
+        "rejected": [{
+            "name": "Campus cover",
+            "path": "assets/logos/orphan-cover.svg",
+            "reason": "cover_or_page_image",
+        }],
+    }), encoding="utf-8")
     poster = tmp_path / "poster.html"
     poster.write_text(
         f"<!doctype html><style>@page {{ size:{canvas}; margin:0; }}{css}</style>"
         f"<header class='titlebar'><div class='{zone_class}'>"
-        "<img class='logo' src=''></div></header>",
+        "<img class='logo' src='assets/logos/orphan-cover.svg'></div></header>",
         encoding="utf-8",
     )
 
@@ -668,4 +773,86 @@ def test_bake_autocompletes_css_hidden_zone_from_disk(
     assert baked
     assert "assets/logos/inst-a.svg" in result
     assert "assets/logos/inst-b.svg" in result
+    assert "orphan-cover.svg" not in result
     assert 'data-lf-fill="' in result
+
+
+def test_bake_without_manifest_keeps_explicit_html_logo_only(tmp_path):
+    """Missing manifest means no discovery, not deletion of an explicit source."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip("Playwright not installed")
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch()
+        except Exception as exc:
+            pytest.skip(f"Chromium not available ({exc})")
+        else:
+            browser.close()
+
+    logos = tmp_path / "assets" / "logos"
+    logos.mkdir(parents=True)
+    _write_test_svg(logos / "explicit.svg")
+    _write_test_svg(logos / "orphan-cover.svg", width=240, color="maroon")
+    poster = tmp_path / "poster.html"
+    poster.write_text(
+        "<!doctype html><style>@page { size:60in 36in; margin:0; }"
+        ".titlebar{width:900px;height:220px}.logo-grid{width:320px;height:180px}"
+        "</style><header class='titlebar'><div class='logo-grid'>"
+        "<img class='logo' src='assets/logos/explicit.svg'></div></header>",
+        encoding="utf-8",
+    )
+
+    baked = fit_logos.bake(poster)
+    result = poster.read_text(encoding="utf-8")
+    assert baked
+    assert "assets/logos/explicit.svg" in result
+    assert "orphan-cover.svg" not in result
+
+
+def test_bake_keeps_separately_owned_venue_logo_outside_allowlist(tmp_path):
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip("Playwright not installed")
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch()
+        except Exception as exc:
+            pytest.skip(f"Chromium not available ({exc})")
+        else:
+            browser.close()
+
+    logos = tmp_path / "assets" / "logos"
+    logos.mkdir(parents=True)
+    _write_test_svg(logos / "approved.svg")
+    _write_test_svg(logos / "orphan-cover.svg", width=240, color="maroon")
+    (logos / "_venue.png").write_bytes(
+        base64.b64decode(PIXEL_DATA_URI.split(",", 1)[1])
+    )
+    (logos / "logos.json").write_text(json.dumps({
+        "logos": [{
+            "name": "Approved Institute",
+            "path": "assets/logos/approved.svg",
+            "approved": True,
+            "decision": "approved",
+        }],
+    }), encoding="utf-8")
+    poster = tmp_path / "poster.html"
+    poster.write_text(
+        "<!doctype html><style>@page { size:60in 36in; margin:0; }"
+        ".titlebar{width:900px;height:220px}.strip{width:700px;height:180px}"
+        "</style><header class='titlebar' data-header='v3'>"
+        "<div class='strip' data-section='logos'><span class='chip conf'>"
+        "<img src='assets/logos/_venue.png'></span>"
+        "<img class='logo' src='assets/logos/orphan-cover.svg'></div></header>",
+        encoding="utf-8",
+    )
+
+    baked = fit_logos.bake(poster)
+    result = poster.read_text(encoding="utf-8")
+    assert baked
+    assert "assets/logos/_venue.png" in result
+    assert "assets/logos/approved.svg" in result
+    assert "orphan-cover.svg" not in result

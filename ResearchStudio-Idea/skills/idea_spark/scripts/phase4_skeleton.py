@@ -179,13 +179,40 @@ def _extract_gpu_days(s: str) -> float | None:
     pattern = re.compile(r'(\d+(?:\.\d+)?)\s*(A100|H100|GPU)[-\s]?day', re.IGNORECASE)
     m = pattern.search(s)
     if not m:
-        # Fallback: first bare number treated as GPU-day — but never a number that
-        # is part of a dollar amount (`$8k API` must not become a phantom 8-GPU-day
-        # line; the API extractor owns those).
+        # Fallback: a bare number MAY be a GPU-day figure — but only when it is a
+        # standalone token. Two exclusions, both learned the hard way:
+        #
+        #  1. Dollar amounts. `$8k API` must not become a phantom 8-GPU-day line;
+        #     the API extractor owns those.
+        #  2. **Digits glued to letters are hardware names, not budgets.** Measured
+        #     failure: intake said `NTU EEE cluster02, slurm; pro6000/a40/a6000
+        #     nodes` — which contains no GPU-day figure at all — and this fallback
+        #     returned 2 (from `cluster02`). A 6 GPU-day request was then judged
+        #     `infeasible` at 200% of a budget that never existed. `a40` would give
+        #     40, `pro6000` would give 6000. The parse did not fail loudly; it
+        #     produced a plausible number, which is the worse failure.
+        #
+        # When nothing qualifies, return None. The caller already handles that
+        # honestly ("Could not parse a numeric GPU-day ... manual review"), and
+        # "I don't know" is the safe direction here — a guessed budget silently
+        # decides feasibility.
+        #  3. A bare number with **no time unit next to it** is not a budget either.
+        #     And when the text carries a GPU-count multiplier (`8x a40`, `x 4`),
+        #     `12 days` means 96 GPU-days, not 12 — the fallback cannot resolve
+        #     that, and guessing 12 **underestimates**, which is the unsafe
+        #     direction: it would call an infeasible plan feasible.
+        if re.search(r'\d+\s*[x×]\s*[A-Za-z]|[x×]\s*\d+\s*(GPU|card)', s, re.I):
+            return None
         for m2 in _NUM.finditer(s):
             prefix = s[max(0, m2.start() - 4):m2.start()]
-            if '$' in prefix or prefix.upper().endswith('USD') or prefix.upper().endswith('USD '):
+            if '$' in prefix or prefix.upper().rstrip().endswith('USD'):
                 continue
+            before = s[m2.start() - 1] if m2.start() > 0 else ''
+            after = s[m2.end()] if m2.end() < len(s) else ''
+            if before.isalpha() or after.isalpha():
+                continue          # cluster02 / a40 / pro6000 / 6000ada / l40
+            if not re.match(r'\s*(gpu[-\s]?)?(day|hour)', s[m2.end():], re.I):
+                continue          # 「budget 12 , mostly inference」不是 12 GPU-day
             return float(m2.group(1))
         return None
     n = float(m.group(1))

@@ -322,18 +322,47 @@ Notes:
   (b) the claim, (c) the setting/setup. No verbatim title strings. No
   generic terms ("deep learning", "transformer"). These get sent verbatim to
   the BM25 retriever in Phase 3.1 collision check (recent window).
-- `alias_terms[]`: 2-4 entries, 3-7 words each — how OTHER research
-  communities would name this candidate's core mechanism. This is a
-  PARAMETRIC-KNOWLEDGE step, not a paraphrase step: ask "if a reward-modeling
-  / classical-CV / RL / NLP / theory group had built this same mechanism 2-3
-  years ago, what would their papers' titles call it?" and write those names
-  (e.g. a "goal-image conditioned scorer for task completion" is, in other
-  vocabularies, a "goal-conditioned success detector" / "goal-image reward
-  model"). Do NOT reuse signature_terms vocabulary or the candidate's own
-  domain wording — the whole point is the words your community does NOT use.
-  Phase 3.1 runs these over a multi-year window to catch same-mechanism
-  ancestors that renamed the idea; a paraphrased signature term catches
-  nothing the signature channel didn't already catch.
+- `alias_terms[]`: 3-7 words each — how OTHER research communities would
+  name this candidate's core mechanism. Phase 3.1 runs these over a
+  multi-year window to catch same-mechanism ancestors that renamed the idea;
+  a paraphrased signature term catches nothing the signature channel didn't
+  already catch. Do NOT reuse signature_terms vocabulary or the candidate's
+  own domain wording — the whole point is the words your community does NOT
+  use. Build the list from TWO sources, in this order:
+
+  (a) MANDATORY — the collateral nodes Phase 1 already named. Read
+      `phase1_output.json`'s `method_lineage.nodes[]` and take every node with
+      `is_collateral: true`. Those nodes are, by their own definition, methods
+      that "attack the same residual through a different mechanism" — i.e.
+      Phase 1 has already done the cross-community naming work and written the
+      answer down. Emit one alias term per collateral node, phrased in THAT
+      field's vocabulary (a node reading "Cost-sensitive learning with
+      test/attribute acquisition costs" yields `cost-sensitive learning
+      attribute acquisition`, not a restatement of your own mechanism).
+      Skip a node ONLY if it is genuinely unreachable from this candidate's
+      mechanism, and say which and why in `composition_note`.
+
+      **This clause exists because the omission was measured, twice.** In one
+      run the pool never surfaced delta debugging / `ddmin` / test-suite
+      minimization and the audit found them only by reading the candidate
+      by hand. In the next run Phase 1 pinned nine collateral families and
+      `alias_terms` queried zero of them — the audit's own retrieval found
+      "combinatorial group testing" hits that turned out to contain the
+      candidate's exact observation model. Terms invented purely from
+      parametric recall systematically miss the families the diagnosis
+      already identified, because recall reaches for near neighbours in your
+      own vocabulary and the collateral list is precisely the far ones.
+
+  (b) THEN 2-4 more from parametric knowledge, for families Phase 1 did not
+      list. Ask "if a reward-modeling / classical-CV / RL / NLP / theory group
+      had built this same mechanism 2-3 years ago, what would their papers'
+      titles call it?" (e.g. a "goal-image conditioned scorer for task
+      completion" is, in other vocabularies, a "goal-conditioned success
+      detector" / "goal-image reward model").
+
+  Phase 3.1 truncates per channel by lexical relevance, so a longer list
+  costs recall of the weakest terms, not of the strong ones — err toward
+  covering every collateral node rather than trimming to a target count.
 - `main_pattern` per entry comes from Phase 2.1; `sub_pattern` is picked
   in this phase's sub-step a. There is no separate `patterns_used[]` field.
 

@@ -17,6 +17,7 @@ UNDER every phase instead of inside one, so a regression here is silent and glob
 Stdlib only. Run: python3 scripts/selftest_units.py
 Exit 0 = all green; 1 = at least one failure (details on stderr).
 """
+import json
 import sys
 from pathlib import Path
 
@@ -151,6 +152,82 @@ f = validate_threat_grounding(_mk(
      'parametric_family_concern': 'family: query-adaptive KV cache retrieval; terms: token budget'},
     ['arxiv:1111.22222']))
 check('G7 family name + vocabulary passes', f == [], str(f))
+
+# --- alias_collateral_coverage -------------------------------------------------
+#
+# Severity split under test: ZERO coverage is a fail (the measured failure mode —
+# Phase 1 handed over the list and Phase 2.2 never opened it); PARTIAL coverage is
+# a warn (a family can be genuinely unreachable, and forcing a fabricated term
+# would evict real ones from a channel that truncates by lexical relevance).
+from scripts.validators.alias_collateral_coverage import validate_alias_collateral_coverage  # noqa: E402
+
+
+def _ac(alias_terms, collateral_methods):
+    """Write a minimal phase1/phase2 pair to temp files and validate them."""
+    import tempfile
+    p1 = {'method_lineage': {'nodes': (
+        [{'node_id': 'n0', 'method': 'Held-out model selection', 'is_collateral': False}]
+        + [{'node_id': f'c{i}', 'method': m, 'is_collateral': True}
+           for i, m in enumerate(collateral_methods)])}}
+    p2 = {'alias_terms': alias_terms}
+    dd = Path(tempfile.mkdtemp(prefix='i2r_ac_'))
+    (dd / 'p1.json').write_text(json.dumps(p1))
+    (dd / 'p2.json').write_text(json.dumps(p2))
+    return validate_alias_collateral_coverage(str(dd / 'p2.json'), str(dd / 'p1.json'))
+
+
+_DDMIN = 'Delta debugging / ddmin and 1-minimality (Zeller & Hildebrandt, 2002)'
+_GT = 'Quantitative group testing and screening designs: Dorfman pooling (1943)'
+
+f = _ac(['reflective prompt rewriting loop', 'held-out gated scaffold search'], [_DDMIN, _GT])
+check('A1 zero collateral coverage fails',
+      len(f) == 1 and f[0]['severity'] == 'fail', str(f))
+
+f = _ac(['delta debugging ddmin minimality', 'quantitative group testing pooling'], [_DDMIN, _GT])
+check('A2 full collateral coverage passes',
+      len(f) == 1 and f[0]['severity'] == 'pass', str(f))
+
+f = _ac(['delta debugging ddmin minimality'], [_DDMIN, _GT])
+check('A3 partial coverage warns and names the gap',
+      len(f) == 1 and f[0]['severity'] == 'warn' and 'group testing' in f[0]['message'], str(f))
+
+# No collateral nodes -> nothing to check. A diagnosis that pinned no cross-field
+# families must not be punished for it; that judgment belongs to Phase 1.
+f = _ac(['anything at all'], [])
+check('A4 no collateral nodes -> silent', f == [], str(f))
+
+# Generic-word overlap must NOT count as coverage. Without this, "cost-aware
+# agent evaluation" would "cover" every node whose name contains cost/agent —
+# a validator that can be satisfied by vocabulary noise trains people to ignore it.
+f = _ac(['cost aware agent evaluation method'],
+        ['Cost-sensitive learning with test/attribute acquisition costs'])
+check('A5 generic-token overlap does not count as coverage',
+      len(f) == 1 and f[0]['severity'] == 'fail', str(f))
+
+# --- B: compute-budget parsing -------------------------------------------
+# Measured failure (i2r run `dllm-oracle`): intake said
+#   "NTU EEE cluster02, slurm; pro6000/a40/a6000/l40/6000ada nodes"
+# — no GPU-day figure anywhere — and the bare-number fallback returned 2
+# (from `cluster02`). A 6 GPU-day request was then judged `infeasible` at 200%
+# of a budget that never existed. `a40` would have given 40, `pro6000` 6000.
+#
+# The parse did not fail loudly; it produced a plausible number. That is the
+# worse failure mode, and it is why the fallback now refuses to guess.
+from phase4_skeleton import _extract_gpu_days as _gd    # noqa: E402
+
+check('B1 hardware model numbers are not budgets',
+      _gd('NTU EEE cluster02, slurm; pro6000/a40/a6000/l40/6000ada nodes') is None,
+      repr(_gd('NTU EEE cluster02, slurm; pro6000/a40/a6000 nodes')))
+check('B2 unit-bearing figures still parse', _gd('about 30 GPU-days on L40') == 30.0)
+check('B3 H100 counts double', _gd('4 H100-day') == 8.0)
+check('B4 dollars are not GPU-days', _gd('$8k API, no GPUs') is None)
+check('B5 a bare number with no time unit is not a budget',
+      _gd('budget 12 , mostly inference') is None)
+# `12 days on 8x a40` is 96 GPU-days, not 12. Guessing 12 UNDERESTIMATES,
+# which would call an infeasible plan feasible — the unsafe direction.
+check('B6 a GPU-count multiplier makes the fallback abstain',
+      _gd('budget: 12 days on 8x a40') is None)
+check('B7 bare number adjacent to a unit still works', _gd('roughly 20 days of compute') == 20.0)
 
 n_fail = sum(1 for _n, ok in RESULTS if not ok)
 print(f'\n[{"RED" if n_fail else "GREEN"}] selftest_units: '

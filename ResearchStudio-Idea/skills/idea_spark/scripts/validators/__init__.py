@@ -6,6 +6,12 @@ Validators:
                             cited parenthetical == that cluster's parent display name. Catches
                             citations guessed from the parent pattern's name instead of read from
                             overview.md.
+  alias_collateral_coverage — Phase 2.2's alias_terms[] actually query the cross-community
+                            families Phase 1 pinned as `is_collateral` nodes. Fail on ZERO
+                            coverage (the measured failure mode — the list was handed over and
+                            not opened), warn on partial (a family can be genuinely unreachable,
+                            and forcing a fabricated term would evict real ones from a channel
+                            that truncates by lexical relevance).
   kill_switch_integrity   — kill-switch fields (falsification_prediction paragraph,
                             compute_budget) byte-identical Phase 2 → Phase 4 (or
                             Phase 2 → Phase 3.3 final_candidate → Phase 4 when revise ran).
@@ -36,6 +42,7 @@ from .subpattern_citation_consistency import validate_subpattern_citation_consis
 from .implementability_completeness import validate_implementability_completeness
 from .implementability_readability import validate_implementability_readability
 from .threat_grounding import validate_threat_grounding
+from .alias_collateral_coverage import validate_alias_collateral_coverage
 
 
 def run_all_validators(phase2_path=None, phase3_path=None, phase4_path=None, phase1_path=None,
@@ -48,6 +55,11 @@ def run_all_validators(phase2_path=None, phase3_path=None, phase4_path=None, pha
 
     if phase2_path:
         findings.extend(validate_subpattern_citation_consistency(phase2_path))
+
+    # Needs BOTH: the collateral list lives in phase1, the queries live in phase2.
+    # `phase1_path` has been a parameter here since before any validator used it.
+    if phase2_path and phase1_path:
+        findings.extend(validate_alias_collateral_coverage(phase2_path, phase1_path))
 
     if phase4_path:
         findings.extend(validate_expansion_completeness(phase4_path))

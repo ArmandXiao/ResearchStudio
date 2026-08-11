@@ -504,24 +504,45 @@ def next_step(run_dir: Path, root: Path, query: str | None = None) -> int:
                      run_dir=d)
 
     # ---- deterministic citation gate (run inline — pure) ----------------------
+    #
+    # Two checks share this gate because both must clear BEFORE 3.1 collision is
+    # launched: collision consumes `alias_terms[]` verbatim, so an alias set that
+    # skipped Phase 1's collateral families spends the whole multi-year retrieval
+    # budget on the wrong vocabulary and the miss is invisible afterwards.
+    gate_fails, gate_warns = [], []
     try:
-        from scripts.validators import validate_subpattern_citation_consistency
+        from scripts.validators import (validate_subpattern_citation_consistency,
+                                        validate_alias_collateral_coverage)
         gate = validate_subpattern_citation_consistency(str(p2g))
+        p1_for_alias = d / 'phase1' / 'phase1_output.json'
+        if p1_for_alias.exists():
+            gate += validate_alias_collateral_coverage(str(p2g), str(p1_for_alias))
         gate_fails = [f for f in gate if f.get('severity') == 'fail']
+        gate_warns = [f for f in gate if f.get('severity') == 'warn']
     except Exception as e:  # never block `next` on a validator crash
         print(f'(citation gate could not run: {e})', file=sys.stderr)
-        gate_fails = []
     if gate_fails:
-        msgs = '; '.join(f.get('message', '') for f in gate_fails[:3])
+        msgs = '; '.join(f.get('message', '').rstrip('. ') for f in gate_fails[:3])
+        alias_hit = any(f.get('validator') == 'alias_collateral_coverage' for f in gate_fails)
+        fix = ('Add one alias_terms[] entry per collateral node, phrased in that field\'s '
+               'vocabulary (see ideate_generate.txt\'s alias_terms clause (a)), then re-run '
+               '`next`. Collision has not run yet — fixing now costs nothing.'
+               if alias_hit else
+               'Fix the citation to a real C## cluster row (or regenerate 2.2 with the card '
+               'actually open).')
         return _emit('Phase 2.2 candidate FAILS the deterministic citation gate.',
-                     'Fix gap_closure[] sub_pattern citations before any Phase 3 work', 'llm_subagent',
+                     'Fix the candidate before any Phase 3 work', 'llm_subagent',
                      prompt=str(ref / 'ideation-sub-patterns' / 'overview.md'),
-                     inputs=[str(p2g)],
+                     inputs=[str(p2g)] + ([str(d / 'phase1' / 'phase1_output.json')]
+                                          if alias_hit else []),
                      output=str(p2g) + ' (edited in place)',
-                     notes=f'Validator findings: {msgs}. Fix the citation to a real C## cluster '
-                           'row (or regenerate 2.2 with the card actually open). Do NOT proceed '
+                     notes=f'Validator findings: {msgs}. {fix} Do NOT proceed '
                            'to Phase 3 until `next` stops reporting this step.',
                      run_dir=d)
+    # Warnings do not block, but they must not be silent either: partial collateral
+    # coverage is how a run loses the one family that names its cause of death.
+    for f in gate_warns:
+        print(f'⚠️  [{f.get("validator")}] {f.get("message")}', file=sys.stderr)
 
     # ---- Phase 2.3 coherence gate (dry-run trace) -------------------------------
     p2c_dir = d / 'phase2_coherence'

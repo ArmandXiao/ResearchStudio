@@ -1362,6 +1362,12 @@ def main():
     pt.add_argument('--paper-id', required=True,
                     help='Anchor paper identifier: paper_id (e.g. openalex:W..., arxiv:2401.12345), '
                          'or a bare arxiv_id / openreview_id / doi. Resolved against lit_results.json.')
+    pt.add_argument('--min-method-chars', type=int, default=4000,
+                    help='Below this many extracted method chars, do NOT treat the anchor as '
+                         'grounded: retry the fetch, and warn loudly if it stays thin. Screening '
+                         'trigger, not a validated bar — provenance is one measured insufficiency '
+                         '(a 2,528-char method left 8 of 16 subject rules unpinnable) plus the p25 '
+                         'of that run\'s pool (3,110). Costs a re-fetch, never blocks. (default: 4000)')
     def _cmd_phase1_fulltext_topup(args):
         from scripts.fetch_sections import fetch_sections, _extract_arxiv_id, _extract_openreview_id
         out_dir = Path(args.out).resolve()
@@ -1399,22 +1405,79 @@ def main():
             return 1
         pid = match.get('paper_id') or match.get('id') or key
 
+        def _pct(n):
+            """Where n sits in THIS run's own method-length distribution (self-calibrating:
+            a corpus of short papers should not read as universally deficient)."""
+            lens = sorted(len(v.get('method') or '') for v in cache.values())
+            if not lens:
+                return None
+            return round(100 * sum(1 for x in lens if x < n) / len(lens))
+
         existing = cache.get(pid)
-        if existing and existing.get('source_used') not in (None, 'failed'):
-            print(f'[topup] {pid} already method-grounded ({existing["source_used"]}) — no-op', file=sys.stderr)
+        n_have = len((existing or {}).get('method') or '')
+        grounded = bool(existing) and existing.get('source_used') not in (None, 'failed')
+
+        # `source_used != failed` means a fetch PATH succeeded. It does NOT mean the
+        # method section that came back is long enough to pin the subject's rules from
+        # — and for an anchor paper that is the entire point of the top-up.
+        #
+        # Measured, once: an anchor whose method extracted to 2,528 chars carried a
+        # `source_used` of html_arxiv and top-up returned no-op, yet Phase 1 could pin
+        # only 8 of the 16 rules it needed (the body ended mid-sentence, right before
+        # the update equation). Every downstream gate then had to reason about a
+        # generator it could not check against the paper.
+        #
+        # The default below is a SCREENING TRIGGER, not a validated bar: its provenance
+        # is that single measured insufficiency (2,528) plus the p25 of the corpus it
+        # came from (3,110), rounded up. Tripping it costs one re-fetch and a warning —
+        # never a block — so an overly strict default is cheap and an overly lax one is
+        # the failure mode we already paid for.
+        if grounded and n_have >= args.min_method_chars:
+            print(f'[topup] {pid} already method-grounded ({existing["source_used"]}, '
+                  f'method {n_have} chars) — no-op', file=sys.stderr)
             return 0
+        if grounded:
+            print(f'[topup] {pid} is grounded ({existing["source_used"]}) but its method section '
+                  f'is only {n_have} chars (< --min-method-chars {args.min_method_chars}, '
+                  f'p{_pct(n_have)} of this run\'s pool) — retrying the fetch rather than '
+                  f'no-opping on a section too thin to pin rules from', file=sys.stderr)
 
         print(f'[topup] fetching intro+method for anchor {pid} ({(match.get("title") or "")[:70]})', file=sys.stderr)
         sections = fetch_sections(match)
-        cache[pid] = {'tier': 'A', **sections}
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False))
-        _write_fulltext_split(out_dir, cache, lit_results)
-        status = sections['source_used']
+        # Never regress: a different extraction path can legitimately return LESS than
+        # what is already cached, and silently replacing a longer method with a shorter
+        # one would make this fix worse than the bug.
+        if existing and len(sections.get('method') or '') < n_have:
+            print(f'[topup] re-fetch returned a shorter method '
+                  f'({len(sections.get("method") or "")} < {n_have}) — keeping the cached one',
+                  file=sys.stderr)
+            sections = {k: v for k, v in existing.items() if k != 'tier'}
+        else:
+            cache[pid] = {'tier': 'A', **sections}
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False))
+            _write_fulltext_split(out_dir, cache, lit_results)
+
+        status = sections.get('source_used')
+        n_now = len(sections.get('method') or '')
         if status == 'failed':
             print(f'[topup] WARN anchor {pid} still failed across all paths — residue stays abstract-level; flag it', file=sys.stderr)
             return 0
-        print(f'[topup] wrote {cache_path} — anchor {pid} now grounded via {status}', file=sys.stderr)
+        if n_now < args.min_method_chars:
+            # Not a failure to fix by retrying — the paper's method section is simply
+            # short (or extracts short). Say so loudly and name the consequence, so the
+            # diagnosis reports which rules it could not pin instead of guessing them.
+            print(f'[topup] ⚠️  anchor {pid} grounded via {status}, but method is {n_now} chars '
+                  f'(p{_pct(n_now)} of this run\'s pool; threshold {args.min_method_chars}). '
+                  f'This is thin enough that some of the subject\'s rules may be unpinnable. '
+                  f'Phase 1 MUST report an explicit rule-pinning ledger — which rules the '
+                  f'fulltext fixes verbatim and which it does not — and Phase 2 must state '
+                  f'claims across a grid over the unpinned ones rather than assuming values '
+                  f'for them. A candidate built on guessed rules cannot survive the 2.3 gate, '
+                  f'which checks generator faithfulness against this same text.', file=sys.stderr)
+            return 0
+        print(f'[topup] wrote {cache_path} — anchor {pid} now grounded via {status} '
+              f'(method {n_now} chars)', file=sys.stderr)
         return 0
     pt.set_defaults(func=_cmd_phase1_fulltext_topup)
 

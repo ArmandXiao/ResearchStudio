@@ -1,19 +1,22 @@
 """Canonical Paper2Video and PPT-Master option contract.
 
-Descriptive fields such as audience, color, and typography remain bounded
-strings because PPT-Master intentionally generates those from the paper;
-every enumerable field is closed over the catalog below.
+Audience remains a bounded paper-aware string. Color and typography are bounded
+strings so explicit user directions and backend-selected Auto values share the
+same schema; every enumerable field is closed over the catalog below.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import random
 import re
 from collections.abc import Mapping
 
 
 CATALOG_VERSION = "paper2video-ppt-options.v1"
+PPT_APPEARANCE_CATALOG_VERSION = "paper2video-ppt-appearance.v1"
 
 PPT_OPTIONS_PUBLIC_CATALOG = {
     "narrative_modes": (
@@ -174,6 +177,23 @@ _CONCRETE_IMAGE_USAGE = tuple(
     value for value in PPT_MASTER_IMAGE_USAGE if value != "auto"
 )
 
+PPT_AUTO_COLOR_DIRECTIONS = (
+    "Light blue palette: background #F8FAFC, text #0F172A, accent #2563EB",
+    "Dark cyan palette: background #0B1120, text #F8FAFC, accent #22D3EE",
+    "Warm coral palette: background #FFF7ED, text #431407, accent #F97316",
+    "Forest palette: background #F0FDF4, text #14532D, accent #10B981",
+    "Burgundy palette: background #FFF1F2, text #4C0519, accent #BE123C",
+    "Violet palette: background #FAF5FF, text #3B0764, accent #7C3AED",
+)
+
+PPT_AUTO_TYPOGRAPHY_DIRECTIONS = (
+    "Aptos Display headings with Aptos body text and strong size contrast",
+    "Arial headings and body text with Courier New for code and data labels",
+    "Georgia headings with Arial body text and restrained editorial contrast",
+    "Trebuchet MS headings with Arial body text and generous spacing",
+    "Arial Black headings with Arial body text and compact bold labels",
+)
+
 PPT_RESOLVED_SCHEMA = {
     "$id": CATALOG_VERSION,
     "type": "object",
@@ -247,6 +267,69 @@ def prompt_catalog() -> dict:
         "image_usage": list(_CONCRETE_IMAGE_USAGE),
         "image_ai_path": ["api", "not-used"],
     }
+
+
+def _is_auto_appearance_text(value: object) -> bool:
+    return str(value or "").strip().lower() in {"", "auto", "random"}
+
+
+def resolve_auto_ppt_appearance(
+    requested: Mapping[str, object],
+    *,
+    task_token: str,
+) -> tuple[dict, dict]:
+    """Resolve appearance-only Auto values before the content resolver runs.
+
+    The task token seeds a local PRNG, so separate jobs receive varied appearance
+    systems while every retry of one job receives the same system.  Narrative,
+    audience, page-count, image, and formula Auto values stay untouched for the
+    paper-aware resolver.  Explicit appearance values always win.
+    """
+    token = str(task_token or "").strip()
+    if not token:
+        raise PptOptionsValidationError(
+            "task_token is required to lock randomized PPT appearance"
+        )
+
+    seed_digest = hashlib.sha256(
+        f"{PPT_APPEARANCE_CATALOG_VERSION}\0{token}".encode("utf-8")
+    ).hexdigest()
+    rng = random.Random(int(seed_digest, 16))
+    resolver_request = dict(requested)
+    randomized_fields: list[str] = []
+
+    requested_style = str(requested.get("ppt_visual_style") or "auto").strip()
+    if requested_style.lower() in {"", "auto", "random"}:
+        visual_style = rng.choice(_CONCRETE_VISUAL_STYLES)
+        resolver_request["ppt_visual_style"] = visual_style
+        randomized_fields.append("visual_style")
+    else:
+        if requested_style not in _CONCRETE_VISUAL_STYLES:
+            raise PptOptionsValidationError(
+                f"ppt_visual_style must be one of {list(PPT_MASTER_VISUAL_STYLES)}"
+            )
+        visual_style = requested_style
+
+    selected = {"visual_style": visual_style}
+    for request_key, resolved_key, choices in (
+        ("ppt_color", "color_direction", PPT_AUTO_COLOR_DIRECTIONS),
+        ("ppt_typography", "typography_direction", PPT_AUTO_TYPOGRAPHY_DIRECTIONS),
+    ):
+        value = requested.get(request_key)
+        if _is_auto_appearance_text(value):
+            value = rng.choice(choices)
+            resolver_request[request_key] = value
+            randomized_fields.append(resolved_key)
+        selected[resolved_key] = str(value)
+
+    appearance_lock = {
+        "catalog_version": PPT_APPEARANCE_CATALOG_VERSION,
+        "strategy": "task-seeded-random",
+        "seed_fingerprint": seed_digest[:16],
+        "randomized_fields": randomized_fields,
+        "selected": selected,
+    }
+    return resolver_request, appearance_lock
 
 
 def export_flags_from_options(opts: Mapping[str, object]) -> list[str]:
@@ -544,16 +627,19 @@ def resolution_prompt(
         "image_api_available": image_api_available,
     }
     return (
-        "Resolve Paper2Video's PPT-Master Auto options before any deck generation. "
+        "Resolve Paper2Video's content-related PPT-Master Auto options before any "
+        "deck generation. Appearance Auto values (visual_style, color_direction, "
+        "and typography_direction) have already been selected and locked by the "
+        "backend; preserve those values exactly. "
         "This is a read-only planning call: inspect the PDF as needed, do not modify "
         "files, and return exactly one JSON object with no Markdown or prose.\n"
         "Every enumerable value MUST be copied verbatim from canonical_catalog. "
         "Never create, combine, alias, or rename an enum id. Preserve every explicit "
-        "non-Auto request exactly. Descriptive audience/color/typography fields may "
-        "be paper-specific strings; an Auto color_direction must include at least "
-        "two concrete #RRGGBB values and typography_direction must name its primary "
-        "font. Set image_ai_path to `api` exactly when image_usage contains `ai`, "
-        "otherwise `not-used`.\n"
+        "non-Auto request exactly. Target audience may be a paper-specific string. "
+        "The locked color_direction must retain its concrete #RRGGBB values, and the "
+        "locked typography_direction must retain its named primary font. Set "
+        "image_ai_path to `api` exactly when image_usage contains `ai`, otherwise "
+        "`not-used`.\n"
         f"{retry}"
         f"canonical_catalog = {json.dumps(prompt_catalog(), ensure_ascii=False)}\n"
         f"json_schema = {json.dumps(PPT_RESOLVED_SCHEMA, ensure_ascii=False)}\n"

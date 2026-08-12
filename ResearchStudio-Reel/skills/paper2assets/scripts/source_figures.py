@@ -16,12 +16,13 @@ Writes assets/figures/*.png + assets/meta/figures.json in the SAME schema as
 extract_pdf.py. Exits 0 if >=1 figure was produced, non-zero otherwise (the
 caller then falls back to the crop pipeline). Never raises on a bad source.
 
-Captions / text / metadata are unaffected — they still come from the PDF text
-(extract_pdf.py), so run this for figures only.
+Text / metadata are unaffected.  TeX captions stay authoritative for source
+figures; PDF-text captions are retained only as alignment candidates.
 """
 from __future__ import annotations
 
 import argparse
+import difflib
 import gzip
 import json
 import re
@@ -111,6 +112,30 @@ def _clean_caption(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _strip_tex_comments(text: str) -> str:
+    r"""Remove unescaped TeX comments while preserving escaped ``\%``."""
+    cleaned: list[str] = []
+    for line in text.splitlines(keepends=True):
+        cut = len(line)
+        for index, char in enumerate(line):
+            if char != "%":
+                continue
+            slashes = 0
+            cursor = index - 1
+            while cursor >= 0 and line[cursor] == "\\":
+                slashes += 1
+                cursor -= 1
+            if slashes % 2 == 0:
+                cut = index
+                break
+        if cut == len(line):
+            cleaned.append(line)
+            continue
+        suffix = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        cleaned.append(line[:cut] + suffix)
+    return "".join(cleaned)
+
+
 def find_main_tex(srcdir: Path) -> Path | None:
     texs = list(srcdir.rglob("*.tex"))
     if not texs:
@@ -133,6 +158,7 @@ def parse_tex_figures(main_tex: Path) -> list[dict]:
         return []
     # inline simple \input/\include so figure order across files is preserved
     def _inline(txt, depth=0):
+        txt = _strip_tex_comments(txt)
         if depth > 3:
             return txt
         def repl(m):
@@ -176,11 +202,22 @@ def _resolve(root: Path, ref: str, gpaths: list[str]) -> Path | None:
     for c in cands:
         if c.exists() and c.suffix.lower() in _GRAPHIC_EXT:
             return c
-    # last resort: match by stem anywhere in the tree
+    # Last resort: match by stem anywhere in the tree, but only when the match
+    # is unique.  arXiv bundles often contain poster/deck assets with generic
+    # names such as ``overview.pdf``; returning the first rglob hit can attach
+    # an unrelated raster to an otherwise valid figure caption.
     stem = Path(ref).stem
-    for f in root.rglob("*"):
-        if f.stem == stem and f.suffix.lower() in _GRAPHIC_EXT:
-            return f
+    matches = sorted(
+        f for f in root.rglob("*")
+        if f.stem == stem and f.suffix.lower() in _GRAPHIC_EXT
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        _eprint(
+            f"[source_figures] ambiguous graphic '{ref}': "
+            f"{len(matches)} same-stem matches; skipping"
+        )
     return None
 
 
@@ -242,33 +279,146 @@ def _fetch(ref: str, dest: Path) -> Path | None:
 
 
 # ── figures.json (extract_pdf schema) ───────────────────────────────────────
-def _load_captions(outdir: Path) -> dict[int, dict]:
+def _caption_entries(outdir: Path) -> list[dict]:
     try:
         caps = json.loads(layout.meta_file(outdir, "captions").read_text())
     except Exception:
-        return {}
-    by_num = {}
+        return []
+    entries: list[dict] = []
     # extract_pdf may emit either a list of {label,text,page} dicts or a
     # {"Figure N": "text"} mapping. Handle both.
     if isinstance(caps, dict):
         for label, text in caps.items():
-            m = re.search(r"(\d+)", str(label))
-            if m and str(label).lower().startswith("figure"):
-                by_num[int(m.group(1))] = {"label": label, "text": text, "page": 0}
-        return by_num
+            if str(label).lower().startswith("figure"):
+                entries.append({"label": str(label), "text": str(text or ""), "page": 0})
+        return entries
     for c in caps:
         if not isinstance(c, dict):
             continue
-        m = re.search(r"(\d+)", c.get("label", ""))
-        if m:
-            by_num[int(m.group(1))] = c
-    return by_num
+        if str(c.get("label", "")).lower().startswith("figure"):
+            entries.append(
+                {
+                    "label": str(c.get("label", "")),
+                    "text": str(c.get("text", "") or ""),
+                    "page": c.get("page", 0),
+                }
+            )
+    return entries
+
+
+def _caption_similarity(left: str, right: str) -> float:
+    def norm(value: str) -> str:
+        value = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^]]*\])?", " ", value.lower())
+        return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+    a, b = norm(left), norm(right)
+    if not a or not b:
+        return 0.0
+    seq = difflib.SequenceMatcher(None, a, b).ratio()
+    at, bt = set(a.split()), set(b.split())
+    common = len(at & bt)
+    token = common / max(1, len(at | bt))
+    containment = common / max(1, min(len(at), len(bt)))
+    prefix = 1.0 if a.startswith(b) or b.startswith(a) else 0.0
+    return max(0.55 * seq + 0.25 * token + 0.20 * containment,
+               0.82 * containment + 0.18 * prefix)
+
+
+def sync_figure_captions(outdir: Path) -> int:
+    """Backfill source-first manifests after PDF captions become available.
+
+    Source graphics are normally extracted before ``extract_pdf --no-figures``.
+    The old flow therefore froze sequential ``Figure i`` labels.  Align TeX
+    captions to PDF captions only when the text match is strong and unique.
+    Never use generated ordinals or document order as a fallback: one skipped
+    or unresolved source graphic would shift every later caption.  TeX
+    ``\\label{...}`` values remain available as ``source_label`` and the TeX
+    caption remains the selected semantic text.
+    """
+    manifest_path = layout.meta_file(outdir, "figures")
+    try:
+        figures = json.loads(manifest_path.read_text())
+    except Exception:
+        return 0
+    captions = _caption_entries(outdir)
+    if not isinstance(figures, list) or not captions:
+        return 0
+
+    unused = set(range(len(captions)))
+    aligned = 0
+    for figure in figures:
+        if not isinstance(figure, dict):
+            continue
+        source_caption = str(
+            figure.get("source_caption")
+            or (figure.get("caption", "") if figure.get("source") == "original" else "")
+            or ""
+        )
+        chosen: int | None = None
+        score = 0.0
+        margin = 0.0
+        if source_caption:
+            ranked = sorted(
+                (
+                    (_caption_similarity(source_caption, captions[idx]["text"]), idx)
+                    for idx in unused
+                ),
+                reverse=True,
+            )
+            if ranked:
+                score = ranked[0][0]
+                second = ranked[1][0] if len(ranked) > 1 else 0.0
+                margin = score - second
+                if score >= 0.72 and (len(ranked) == 1 or margin >= 0.08):
+                    chosen = ranked[0][1]
+        if chosen is None:
+            figure["caption_alignment"] = {
+                "method": "source-caption-similarity",
+                "status": "unresolved",
+                "confidence": round(score, 3),
+                "margin": round(margin, 3),
+            }
+            continue
+
+        unused.remove(chosen)
+        caption = captions[chosen]
+        figure["source_caption"] = source_caption
+        figure["original_label"] = caption["label"]
+        figure["caption_label"] = caption["label"]
+        # The TeX caption belongs to the exact figure environment that yielded
+        # this raster.  Keep it authoritative; the layout-extracted PDF text is
+        # often polluted by the neighbouring column.
+        figure["caption"] = source_caption
+        if caption.get("page"):
+            figure["page"] = caption["page"]
+        candidates = []
+        if source_caption:
+            candidates.append(
+                {
+                    "label": figure.get("source_label") or caption["label"],
+                    "text": source_caption,
+                    "source": "tex",
+                }
+            )
+        candidates.append(
+            {"label": caption["label"], "text": caption["text"], "source": "pdf-text"}
+        )
+        figure["caption_candidates"] = candidates
+        figure["caption_alignment"] = {
+            "method": "source-caption-similarity",
+            "status": "aligned",
+            "confidence": round(score, 3),
+            "margin": round(margin, 3),
+        }
+        aligned += 1
+
+    manifest_path.write_text(json.dumps(figures, indent=2, ensure_ascii=False) + "\n")
+    return aligned
 
 
 def write_figures(entries: list[tuple[Path, str, str]], outdir: Path) -> int:
     """entries = [(rasterised_png, caption, label)] in figure order."""
     figdir = layout.figures_dir(outdir, create=True)
-    caps = _load_captions(outdir)
     manifest = []
     for i, (png, caption, label) in enumerate(entries, 1):
         final = figdir / f"figure{i}.png"
@@ -280,17 +430,22 @@ def write_figures(entries: list[tuple[Path, str, str]], outdir: Path) -> int:
         except Exception:
             w = h = 0
         clabel = f"Figure {i}"
-        cap = caption or (caps.get(i, {}).get("text", ""))
-        page = caps.get(i, {}).get("page", 0)
+        cap = caption or ""
         manifest.append({
             "file": f"{layout.FIGURES}/{final.name}",
-            "page": page, "page_width": w, "page_height": h,
+            "page": 0, "page_width": w, "page_height": h,
             "width": w, "height": h, "column": "full", "num_columns": 1,
+            "original_label": clabel,
             "caption_label": clabel, "caption": cap,
-            "caption_candidates": [{"label": clabel, "text": cap}],
+            "caption_candidates": [{"label": clabel, "text": cap, "source": "tex"}],
+            "source_label": label,
+            "source_caption": caption,
             "source": "original",
         })
-    layout.meta_file(outdir, "figures", create_parent=True).write_text(json.dumps(manifest, indent=2))
+    layout.meta_file(outdir, "figures", create_parent=True).write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    )
+    sync_figure_captions(outdir)
     return len(manifest)
 
 
@@ -327,7 +482,17 @@ def main() -> int:
             if figs:
                 print(f"[source_figures] parsed {len(figs)} figure env(s) from {main_tex.name}")
                 for k, fig in enumerate(figs, 1):
-                    ref = fig["graphics"][0]        # main graphic (subfigs -> first)
+                    if len(fig["graphics"]) != 1:
+                        # A caption describing a six-panel composite must not
+                        # be attached to only the first child raster.  The PDF
+                        # crop path can recover the rendered composite safely.
+                        _eprint(
+                            f"[source_figures]   fig{k}: "
+                            f"{len(fig['graphics'])} includegraphics entries; "
+                            "skip incomplete source composite"
+                        )
+                        return 3
+                    ref = fig["graphics"][0]
                     src = _resolve((tmp / "source"), ref, fig["gpaths"])
                     if not src:
                         _eprint(f"[source_figures]   fig{k}: could not resolve {ref}")

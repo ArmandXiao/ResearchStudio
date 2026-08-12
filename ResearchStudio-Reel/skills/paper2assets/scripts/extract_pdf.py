@@ -44,6 +44,7 @@ CAPTION_HEADER_RE = re.compile(
 )
 CAPTION_MID_RE = re.compile(
     r"(?:^|\s{2,})(?P<label>(?:Figure|Fig\.?|Table)\s+\d+)\s*[:.]\s+(?P<rest>\S.*)$",
+    re.IGNORECASE,
 )
 
 
@@ -53,6 +54,42 @@ def extract_text(pdf: Path, out: Path) -> str:
     )
     out.write_text(text)
     return text
+
+
+def _caption_column_text(
+    line: str, *, label_col: int, content_col: int | None = None,
+) -> str:
+    """Return only the caption's column from one ``pdftotext -layout`` line.
+
+    Layout text interleaves both PDF columns on one terminal line.  A left
+    caption must stop at the wide inter-column gutter; a right caption must
+    start at the same horizontal offset as its header.  This prevents the
+    neighbouring body column from becoming semantic caption evidence.
+    """
+    if content_col is not None:
+        segment = line[content_col:]
+    elif label_col > 8:
+        if len(line) <= label_col:
+            return ""
+        # A real right-column continuation is preceded by the PDF gutter.
+        # Without it, slicing at label_col would cut through a long left-column
+        # prose line and treat its tail as caption text.
+        prefix = line[:label_col]
+        if prefix.strip() and len(prefix) - len(prefix.rstrip()) < 2:
+            return ""
+        segment = line[label_col:]
+        if len(segment) - len(segment.lstrip()) > 8:
+            return ""
+    else:
+        segment = line
+
+    if label_col <= 8:
+        # pdftotext uses a run of spaces for the column gutter; ordinary word
+        # separation inside captions remains one or two spaces.
+        gutter = re.search(r"\s{4,}(?=\S)", segment[12:])
+        if gutter:
+            segment = segment[: 12 + gutter.start()]
+    return segment.strip()
 
 
 def parse_captions(text: str) -> dict[str, str]:
@@ -77,23 +114,36 @@ def parse_captions(text: str) -> dict[str, str]:
             r"^(?:Figure|Fig\.?)\b", "Figure", label_raw, flags=re.IGNORECASE
         ).strip()
         label = re.sub(r"\s+", " ", label)
-        buf = [m.group("rest").strip()]
+        label_col = m.start("label")
+        first = _caption_column_text(
+            lines[i], label_col=label_col, content_col=m.start("rest"),
+        )
+        buf = [first]
         j = i + 1
         # Collect continuation lines until a blank line or a new caption header.
         while j < len(lines):
+            # Layout text alone cannot tell a wrapped caption from the next
+            # paragraph in the same column.  Once a complete lead sentence is
+            # available, stop rather than letting unrelated body prose become
+            # semantic caption evidence downstream.
+            if re.search(r"[.!?](?:[\"')\]]*)$", " ".join(buf).rstrip()):
+                break
             nxt = lines[j]
             if not nxt.strip():
                 break
-            if CAPTION_HEADER_RE.match(nxt):
+            if CAPTION_HEADER_RE.match(nxt) or CAPTION_MID_RE.search(nxt):
+                break
+            continuation = _caption_column_text(nxt, label_col=label_col)
+            if not continuation:
                 break
             # Stop if we hit what looks like a section heading (short ALLCAPS or
             # a numbered section like "3.1 G1: ...").
-            if re.match(r"^\s*\d+(\.\d+)*\s+[A-Z]", nxt):
+            if re.match(r"^\s*\d+(\.\d+)*\s+[A-Z]", continuation):
                 break
-            buf.append(nxt.strip())
+            buf.append(continuation)
             j += 1
             # Captions are rarely longer than ~12 lines; cap to keep noise out.
-            if j - i > 12:
+            if j - i > 12 or sum(len(part) for part in buf) > 1800:
                 break
         caption = " ".join(s for s in buf if s).strip()
         # Compress whitespace.
@@ -711,7 +761,10 @@ def extract_figures_pymupdf(pdf: Path, figdir: Path, text: str) -> list[dict]:
                     "num_columns": num_cols_eff,
                     "caption_label": label,
                     "caption": cap_text,
-                    "caption_candidates": [{"label": label, "text": cap_text}],
+                    "caption_candidates": [
+                        {"label": label, "text": cap_text, "source": "pdf-text"}
+                    ],
+                    "source": "pdf-crop",
                 })
                 pix = None
             except Exception as e:
@@ -897,6 +950,18 @@ def main():
         print(f"    DOI: {metadata['doi']}")
 
     if args.no_figures:
+        # source_figures.py usually runs before this command, when
+        # captions.json does not exist yet.  Reconcile its TeX labels/captions
+        # with the printed PDF captions now so skipped/unresolved source
+        # graphics do not silently renumber every later figure.
+        try:
+            from source_figures import sync_figure_captions
+
+            aligned = sync_figure_captions(outdir)
+            if aligned:
+                print(f"  backfilled {aligned} source figure caption(s) -> figures.json")
+        except Exception as exc:
+            print(f"  warning: source figure caption backfill failed: {exc}", file=sys.stderr)
         print("Skipping figure extraction (--no-figures; original figures supplied by source_figures.py).")
         return
 

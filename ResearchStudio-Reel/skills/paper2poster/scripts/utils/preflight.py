@@ -18,12 +18,26 @@ still map to the same line in the original file.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections.abc import Callable
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .cli_common import eprint as _eprint
+from .figure_semantics import (
+    build_selection_manifest,
+    eligible_for_role,
+    figure_id,
+    load_figure_records,
+    normalize_asset_path,
+    record_for_file,
+    role_scores,
+    semantic_contract_present,
+    semantic_commit_error,
+    semantics_available,
+)
 from .textutil import ascii_safe
 
 
@@ -53,6 +67,213 @@ LATEX_PATTERNS: list[tuple[str, str]] = [
     (r"(?<![\\a-zA-Z])\\\s",
         r"backslash-space '\\ ' (will render literally)"),
 ]
+
+
+_VOID_ELEMENTS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
+
+
+class _FigureUsageParser(HTMLParser):
+    """Collect ``<figure><img>`` sources with their nearest section id."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, str, bool]] = []
+        self.usages: list[tuple[str, str, int]] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        tag_l = tag.lower()
+        attr_map = {str(key).lower(): value or "" for key, value in attrs}
+        parent_section = self.stack[-1][1] if self.stack else ""
+        parent_figure = self.stack[-1][2] if self.stack else False
+        section_id = attr_map.get("data-section", "").strip() or parent_section
+        in_figure = parent_figure or tag_l == "figure"
+        if tag_l == "img" and section_id:
+            src = attr_map.get("src", "").strip()
+            if src and not src.startswith("{{"):
+                self.usages.append((section_id, src, self.getpos()[0]))
+        if tag_l not in _VOID_ELEMENTS:
+            self.stack.append((tag_l, section_id, in_figure))
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in _VOID_ELEMENTS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        wanted = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == wanted:
+                del self.stack[index:]
+                return
+
+
+def _usage_role(section_id: str) -> str | None:
+    section = section_id.strip().lower().replace("_", "-")
+    if section == "motivation":
+        return "motivation"
+    if section == "method" or section.startswith("method-"):
+        return "method"
+    if section in {
+        "key-result", "key-results", "result", "results",
+        "qualitative-result", "qualitative-results",
+    }:
+        return "result"
+    return None
+
+
+def _semantic_figure_lint(
+    html_path: Path, raw: str,
+) -> tuple[list[str], list[str]]:
+    """Validate section figure choices against the upstream semantic contract.
+
+    New semantic bundles are a hard contract.  Legacy or partial bundles must
+    be upgraded rather than falling back to raw-model figure guessing.
+    """
+    figures_path = html_path.parent / "assets" / "meta" / "figures.json"
+    if not figures_path.is_file():
+        return [], []
+
+    problems: list[str] = []
+    warnings: list[str] = []
+    try:
+        records = load_figure_records(figures_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return [f"cannot read figure metadata '{figures_path}': {exc}"], []
+
+    if not semantics_available(records):
+        state = (
+            "invalid/partial figure_semantics.v2 contract"
+            if semantic_contract_present(records)
+            else "legacy figures.json without figure_semantics.v2"
+        )
+        problems.append(
+            f"{state}; upgrade the paper2assets bundle with build_package.py "
+            "--skip-extract --paper-spec before rendering. Manual/raw-model "
+            "figure attribution is disabled"
+        )
+        return problems, warnings
+
+    commit_error = semantic_commit_error(figures_path, records)
+    if commit_error:
+        problems.append(commit_error)
+        return problems, warnings
+
+    expected = build_selection_manifest(records, figures_path=figures_path)
+    selection_path = figures_path.with_name("figure_selection.json")
+    if not selection_path.is_file():
+        problems.append(
+            "semantic figures.json is present but figure_selection.json is "
+            "missing; run scripts/select_figures.py on this bundle before "
+            "substituting poster figures"
+        )
+        manifest = expected
+    else:
+        try:
+            manifest = json.loads(selection_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            problems.append(
+                f"cannot read semantic selection manifest '{selection_path}': {exc}"
+            )
+            manifest = expected
+
+    if not isinstance(manifest, dict):
+        problems.append("figure_selection.json must contain a JSON object")
+        manifest = expected
+
+    # Compare every field that the selector deterministically recomputes.  A
+    # file-only comparison misses stale confidence/evidence/captions and old
+    # thresholds even when the winning path happens to remain unchanged.
+    for field in (
+        "schema_version", "source", "mode", "semantics_available",
+        "thresholds", "selections", "warnings",
+    ):
+        if manifest.get(field) != expected.get(field):
+            problems.append(
+                f"stale/non-deterministic figure_selection.json field "
+                f"'{field}'; rerun scripts/select_figures.py"
+            )
+
+    actual_selections = manifest.get("selections", {})
+    if not isinstance(actual_selections, dict):
+        problems.append("figure_selection.json has no selections object")
+        actual_selections = {}
+
+    parser = _FigureUsageParser()
+    parser.feed(raw)
+    tracked: list[tuple[str, str, str, int]] = []
+    for section_id, src, line in parser.usages:
+        role = _usage_role(section_id)
+        if role is not None:
+            tracked.append((role, section_id, src, line))
+
+    used_by_role: dict[str, set[str]] = {
+        "method": set(), "motivation": set(), "result": set(),
+    }
+    first_by_role: set[str] = set()
+    for role, section_id, src, line in tracked:
+        normalized = normalize_asset_path(src)
+        record = record_for_file(records, normalized)
+        if record is None and not (
+            normalized.startswith("assets/figures/")
+            or normalized.startswith("figures/")
+        ):
+            # Local logos, QR codes, and decorative assets may live inside a
+            # section.  Only sources that resolve to a figure record, or claim
+            # the canonical figure directory, participate in semantic lint.
+            continue
+        used_by_role[role].add(normalized)
+        if record is None:
+            problems.append(
+                f"L{line}: {section_id} figure '{src}' is absent or ambiguous "
+                "in assets/meta/figures.json"
+            )
+            continue
+        if not eligible_for_role(record, role):
+            scores = role_scores(record)
+            score_text = ", ".join(
+                f"{name}={score:.2f}" for name, score in sorted(scores.items())
+            ) or "no semantic roles"
+            problems.append(
+                f"L{line}: {section_id} uses {figure_id(record)} but it is not "
+                f"eligible for {role} ({score_text})"
+            )
+
+        # The first canonical figure in each primary section must be the
+        # deterministic selector's choice.  Further result figures remain
+        # allowed when each independently passes the role gate.
+        if role not in first_by_role:
+            first_by_role.add(role)
+            selected = actual_selections.get(role)
+            selected_file = (
+                normalize_asset_path(selected.get("file"))
+                if isinstance(selected, dict) else ""
+            )
+            if not selected_file:
+                problems.append(
+                    f"L{line}: {section_id} contains {figure_id(record)}, but "
+                    f"the deterministic selector returned no {role} figure"
+                )
+            elif normalized != selected_file:
+                problems.append(
+                    f"L{line}: {section_id} uses '{normalized}', but the "
+                    f"deterministic {role} selection is '{selected_file}'"
+                )
+
+    overlap = used_by_role["method"].intersection(used_by_role["motivation"])
+    for src in sorted(overlap):
+        problems.append(
+            f"Method and Motivation reuse the same figure '{src}'; the roles "
+            "must be disjoint"
+        )
+
+    return problems, warnings
 
 
 def _newline_preserving_sub(pattern: str, html: str, *,
@@ -160,7 +381,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     problems: list[str] = []
     warnings: list[str] = []
 
-    # 0) Unclosed <style>/<script>/<!-- --> . strip_for_lint needs the
+    # 0) Figure-to-section semantics.  New paper2assets bundles carry an
+    #    auditable contract and fail on a mismatched Motivation/Method/Result
+    #    image. Legacy/partial bundles fail until Paper2Assets upgrades them.
+    semantic_problems, semantic_warnings = _semantic_figure_lint(html_path, raw)
+    problems.extend(semantic_problems)
+    warnings.extend(semantic_warnings)
+
+    # 1) Unclosed <style>/<script>/<!-- --> . strip_for_lint needs the
     #    closer to remove the block, so an unclosed opener SURVIVES in
     #    `body`. A real browser swallows the rest of the document into that
     #    construct -- which makes every post-strip check below (LaTeX scan,
@@ -176,13 +404,13 @@ def cmd_preflight(args: argparse.Namespace) -> int:
             "would otherwise swallow the rest of the poster into it."
         )
 
-    # 1) LaTeX residue.
+    # 2) LaTeX residue.
     for pat, desc in LATEX_PATTERNS:
         for m in re.finditer(pat, body):
             ln = body[: m.start()].count("\n") + 1
             problems.append(f"L{ln}: {desc} -> '{ascii_safe(m.group(0))}'")
 
-    # 2) Raw '<' inside math segments. The common HTML-parse failure
+    # 3) Raw '<' inside math segments. The common HTML-parse failure
     #    case is `a<b` / `x<y`. We catch '<' even after a letter/digit.
     #    Suppressed only when it's an escape `\<` or part of `</` / `<!`
     #    (HTML constructs MathJax never sees) or `<=` (a single MathJax
@@ -207,7 +435,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
                 f"'{ascii_safe(mbody.strip()[:60])}' -- use \\lt"
             )
 
-    # 3) Image src: local must exist; remote http(s) warns. A print
+    # 4) Image src: local must exist; remote http(s) warns. A print
     #    poster should be self-contained -- a CDN image that 404s or is
     #    slow at render time silently breaks the figure, and the render
     #    gates can't see a missing remote image. data: URIs are inline.
@@ -238,7 +466,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
             ln = body[: m.start()].count("\n") + 1
             problems.append(f"L{ln}: missing local image '{ascii_safe(src)}'")
 
-    # 4) data-measure-role="poster" required on the root. Paper2poster
+    # 5) data-measure-role="poster" required on the root. Paper2poster
     #    templates carry no `data-measure-role` attributes and use
     #    `class="poster"` instead; accept that as a valid substitute so
     #    the runtime class-fallback shim in render.py can map it.
@@ -256,7 +484,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
             '(or class="poster") to the outer container'
         )
 
-    # 5) Unknown role values flag silent measure misses.
+    # 6) Unknown role values flag silent measure misses.
     for m in re.finditer(
         r'data-measure-role\s*=\s*["\']([^"\']+)["\']', body
     ):
@@ -268,7 +496,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
                 f"(allowed: {sorted(KNOWN_ROLES)})"
             )
 
-    # 6) Soft sanity: no <title> / no <h1>. Warns, doesn't fail.
+    # 7) Soft sanity: no <title> / no <h1>. Warns, doesn't fail.
     if not re.search(r"<title[^>]*>.+?</title>", raw, re.DOTALL):
         warnings.append("no <title> set")
     if not re.search(r"<h1\b", raw):
@@ -276,7 +504,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
             "no <h1> -- poster title block usually carries one"
         )
 
-    # 7) Every kept <figure> must carry a non-empty one-line <figcaption>.
+    # 8) Every kept <figure> must carry a non-empty one-line <figcaption>.
     #    A figure whose caption is missing or blank renders as an unlabeled
     #    image -- a recurring defect on method / architecture figures. Warn
     #    (not fail: a purely decorative figure is a rare valid exception) but

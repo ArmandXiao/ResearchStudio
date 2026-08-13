@@ -426,7 +426,10 @@ def next_step(run_dir: Path, root: Path, query: str | None = None) -> int:
             retry_note = (' RETRY MODE: also pass ' + ' and '.join(_parts) +
                           ' as negative constraints (see the OPTIONAL retry input in '
                           'ideate_select.txt); upheld blocking findings in ANY archived audit '
-                          'are POSITIVE directives the new mechanism must confront.')
+                          'are POSITIVE directives the new mechanism must confront, and their '
+                          '`structural_requirement` (in the archived blocking_findings.json) names '
+                          'the identifying condition, the excluded sources, and the salvage — read '
+                          'it before re-selecting.')
     # Cross-run mechanism dedup (soft): sibling run dirs under the same parent are
     # scanned for their canonical candidates, whose titles + signature terms ride
     # along as SOFT negative anchors — adjacent-direction runs otherwise silently

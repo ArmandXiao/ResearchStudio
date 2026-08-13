@@ -69,6 +69,16 @@ Inputs (explicit paths):
   REQUIREMENT for this retry, not just something to avoid: prefer the
   gap×pattern selection whose natural mechanism must solve X head-on, and
   record that obligation in `selection_rationale` so Phase 2.2 inherits it.
+  When those entries carry a `structural_requirement`, it is the most
+  load-bearing input you have: it states the identifying condition any
+  mechanism here must possess, which sources of it are available vs
+  excluded (and why), and what is worth SALVAGING from the failed attempt.
+  Treat an EXCLUDED source as a hard constraint — re-selecting toward it
+  burns the retry on a known wall — and treat the salvage list as assets
+  the new selection may keep rather than re-derive. It may also re-scope:
+  when it shows the anchor gap does not actually require the component
+  that failed, a selection built around the surviving component is the
+  cheapest live path.
   Do not mention
   the failed attempt in your output fields — it shapes selection, not prose.
 - **OPTIONAL — cross-run dedup**: the host's input list MAY carry a line

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # Make `utils` importable when this file is run directly via
 # `python tools/check_poster.py …`.
@@ -46,6 +47,7 @@ from utils import polish as _polish  # noqa: E402
 from utils import preflight as _preflight  # noqa: E402
 from utils import slack as _slack  # noqa: E402
 from utils import verify_final as _verify_final  # noqa: E402
+from utils.font_fidelity import freeze_system_font_webfont  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -314,6 +316,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Geometry/fill measurements must use the same deterministic browser face
+    # that final rendering will bake into the standalone poster bundle.  In
+    # particular, Linux naturally resolves Arial/Times New Roman to Nimbus,
+    # while the portable final mapping uses DejaVu; injecting only at final
+    # render would change wrapping *after* the strict fill gate passed.
+    if args.cmd in {"pack", "slack", "polish", "autofit"}:
+        try:
+            freeze_system_font_webfont(Path(args.html).resolve())
+        except Exception as exc:  # soft, matching render_poster's font path
+            print(
+                f"[poster_check] WARN: portable font preparation skipped: {exc}",
+                file=sys.stderr,
+            )
     return args.func(args)
 
 

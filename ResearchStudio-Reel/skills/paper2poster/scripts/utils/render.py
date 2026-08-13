@@ -6,8 +6,9 @@ standalone ``render_poster`` script. Centralises:
 1. Print-emulated Chromium context at the correct viewport.
 2. MathJax detection + bounded typeset wait (so a stuck CDN can't
    hang the script forever).
-3. ``document.fonts.ready`` + two RAFs + a fixed settle ms — so
-   the layout is locked before any geometry is read.
+3. ``document.fonts.ready`` + one shared resize/refit notification + two RAFs
+   + a fixed settle ms — so template figure fitting observes the final math
+   and font metrics before any geometry is read.
 4. A sanity check that catches the "page has ``$…$`` TeX in body text
    but no rendered ``<mjx-container>``" case — MathJax never ran
    (CDN blocked, script error, …). Measurement / polish must NOT
@@ -270,7 +271,7 @@ def settle_page(
     mathjax_timeout_ms: int = 15000,
     settle_ms: int = 500,
 ) -> SettleResult:
-    """Wait for MathJax, fonts, two RAFs, and an extra fixed ms.
+    """Wait for MathJax/fonts, refit resize listeners, and an extra fixed ms.
 
     Returns a :class:`SettleResult` rather than raising — the caller
     decides whether each flag is a hard fail or a soft warning.
@@ -320,7 +321,14 @@ def settle_page(
             mj_status = "error"
             mj_error = str(e)
 
-    # 3) Fonts (best-effort) + two RAFs + fixed settle ms.
+    # 3) Fonts (best-effort), then notify the template's existing resize ->
+    #    relayout path.  Figure fitting normally runs on ``load``, which can be
+    #    earlier than asynchronous MathJax typesetting or webfont settlement.
+    #    Without this final notification, slack/polish can measure one set of
+    #    pinned figure dimensions while render_poster (or a later browser open)
+    #    observes another.  Dispatch first, then wait two RAFs: the template's
+    #    resize listener schedules its relayout on the first frame, and the
+    #    second frame observes that completed geometry.
     try:
         page.evaluate(
             "() => document.fonts && document.fonts.ready "
@@ -329,8 +337,11 @@ def settle_page(
     except Exception:
         pass
     page.evaluate(
-        "() => new Promise(r => "
-        "requestAnimationFrame(() => requestAnimationFrame(r)))"
+        "() => {"
+        "  window.dispatchEvent(new Event('resize'));"
+        "  return new Promise(r => "
+        "    requestAnimationFrame(() => requestAnimationFrame(r)));"
+        "}"
     )
     page.wait_for_timeout(settle_ms)
 

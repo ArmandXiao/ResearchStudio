@@ -4,8 +4,8 @@ The poster composer intentionally exposes familiar Mac/Windows PowerPoint
 family names.  Those proprietary fonts are not guaranteed to be installed on
 the Linux renderer or on an HTML viewer's machine, so the same CSS can resolve
 to different glyph metrics and wrap differently.  This module freezes browser
-rendering to a licensed DejaVu face while retaining the requested CSS family
-name for the native PPTX handoff.
+rendering to a licensed, metrically compatible face where one is available
+while retaining the requested CSS family name for the native PPTX handoff.
 """
 from __future__ import annotations
 
@@ -19,18 +19,58 @@ from pathlib import Path
 from .cli_common import eprint
 
 
-_FIDELITY_VERSION = "4"
-_LICENSE_NAME = "RS-DejaVu-LICENSE.txt"
+_FIDELITY_VERSION = "5"
+_BUNDLED_FONT_DIR = Path(__file__).resolve().parents[2] / "assets" / "fonts"
 
 _PORTABLE_FAMILIES = {
     "calibri": ("Calibri", "DejaVu Sans"),
     "aptos": ("Aptos", "DejaVu Sans"),
-    "arial": ("Arial", "DejaVu Sans"),
+    # Arimo is metrically compatible with Arial.  DejaVu Sans is not: on a
+    # real four-column poster its wider metrics reflowed the header and made a
+    # previously 95%-wide figure refit to 79% before the expand validator took
+    # its baseline.
+    "arial": ("Arial", "Arimo"),
     "verdana": ("Verdana", "DejaVu Sans"),
     "trebuchet ms": ("Trebuchet MS", "DejaVu Sans"),
     "cambria": ("Cambria", "DejaVu Serif"),
     "times new roman": ("Times New Roman", "DejaVu Serif"),
     "georgia": ("Georgia", "DejaVu Serif"),
+}
+
+_FONT_SOURCES = {
+    "Arimo": {
+        "regular_style": "Regular",
+        "bold_style": "Bold",
+        "license_name": "RS-Arimo-LICENSE.txt",
+        "bundled_regular": _BUNDLED_FONT_DIR / "Arimo-Regular.ttf",
+        "bundled_bold": _BUNDLED_FONT_DIR / "Arimo-Bold.ttf",
+        "bundled_license": _BUNDLED_FONT_DIR / "Arimo-LICENSE.txt",
+        "license_candidates": (
+            Path("/usr/share/doc/fonts-croscore/copyright"),
+            Path("/usr/share/licenses/ttf-croscore/LICENSE"),
+            Path("/usr/share/licenses/croscore-fonts/LICENSE"),
+        ),
+    },
+    "DejaVu Sans": {
+        "regular_style": "Book",
+        "bold_style": "Bold",
+        "license_name": "RS-DejaVu-LICENSE.txt",
+        "license_candidates": (
+            Path("/usr/share/doc/fonts-dejavu-core/copyright"),
+            Path("/usr/share/licenses/ttf-dejavu/LICENSE"),
+            Path("/usr/share/licenses/dejavu-fonts/LICENSE"),
+        ),
+    },
+    "DejaVu Serif": {
+        "regular_style": "Book",
+        "bold_style": "Bold",
+        "license_name": "RS-DejaVu-LICENSE.txt",
+        "license_candidates": (
+            Path("/usr/share/doc/fonts-dejavu-core/copyright"),
+            Path("/usr/share/licenses/ttf-dejavu/LICENSE"),
+            Path("/usr/share/licenses/dejavu-fonts/LICENSE"),
+        ),
+    },
 }
 
 _FIDELITY_PATTERN = re.compile(
@@ -48,11 +88,13 @@ def managed_font_asset_names() -> frozenset[str]:
     names source-derived so adding another portable family automatically puts
     its files inside the same render transaction.
     """
-    names = {_LICENSE_NAME}
+    names: set[str] = set()
     for _requested_family, source_family in _PORTABLE_FAMILIES.values():
+        source = _FONT_SOURCES[source_family]
         source_slug = source_family.replace(" ", "")
         names.add(f"RS-{source_slug}-Regular.ttf")
         names.add(f"RS-{source_slug}-Bold.ttf")
+        names.add(str(source["license_name"]))
     return frozenset(names)
 
 
@@ -76,8 +118,8 @@ def _copy_public_asset_atomic(source: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _resolve_dejavu(family_name: str, style: str) -> Path | None:
-    """Resolve only the explicitly requested DejaVu family via fontconfig."""
+def _resolve_exact_family(family_name: str, style: str) -> Path | None:
+    """Resolve only the explicitly requested family via fontconfig."""
     try:
         match = subprocess.run(
             [
@@ -96,10 +138,15 @@ def _resolve_dejavu(family_name: str, style: str) -> Path | None:
     fields = match.stdout.strip().split("\t", 2)
     if len(fields) != 3:
         return None
-    family, _actual_style, filename = fields
+    family, actual_style, filename = fields
     # fc-match always returns *some* fallback. Redistribute only the requested
-    # DejaVu family covered by the license copied below.
+    # family covered by the license copied below.
     if family.split(",", 1)[0].strip().casefold() != family_name.casefold():
+        return None
+    actual_styles = {
+        item.strip().casefold() for item in actual_style.split(",")
+    }
+    if style.casefold() not in actual_styles:
         return None
     path = Path(filename)
     return path if path.is_file() else None
@@ -108,12 +155,13 @@ def _resolve_dejavu(family_name: str, style: str) -> Path | None:
 def freeze_system_font_webfont(html_path: Path) -> bool:
     """Freeze selectable OS-font stacks to redistributable browser faces.
 
-    Serif selections map to DejaVu Serif and sans-serif selections map to
-    DejaVu Sans.  The exact open-licensed faces and their license notice are
-    copied into the deliverable, then exposed through ``@font-face`` rules
-    carrying the *requested* family name.  HTML/PDF/PNG therefore use one
-    custom face on every client, while html2pptx continues to emit the user's
-    requested native family into PowerPoint.
+    Arial maps to metric-compatible Arimo.  Other serif selections map to
+    DejaVu Serif and other sans-serif selections map to DejaVu Sans.  The exact
+    open-licensed faces and their license notice are copied into the
+    deliverable, then exposed through ``@font-face`` rules carrying the
+    *requested* family name.  HTML/PDF/PNG therefore use one custom face on
+    every client, while html2pptx continues to emit the user's requested native
+    family into PowerPoint.
 
     If the HTML already supplies an independent custom ``@font-face`` for the
     selected family, it is treated as intentionally licensed and left alone.
@@ -150,12 +198,14 @@ def freeze_system_font_webfont(html_path: Path) -> bool:
         )
         return True
     requested_family, source_family = selected
+    source = _FONT_SOURCES[source_family]
     # Keep the source family in the asset URL. A generic PosterFont.ttf URL
     # can remain cached as Serif after a poster switches Georgia -> Arial (or
     # vice versa), even though the file on the server has been overwritten.
     source_slug = source_family.replace(" ", "")
     regular_name = f"RS-{source_slug}-Regular.ttf"
     bold_name = f"RS-{source_slug}-Bold.ttf"
+    license_name = str(source["license_name"])
 
     for face in re.findall(
         r"@font-face\s*\{.*?\}",
@@ -215,7 +265,7 @@ def freeze_system_font_webfont(html_path: Path) -> bool:
             (out_fonts / name).is_file()
             and (out_fonts / name).stat().st_size
             > (100_000 if name.endswith(".ttf") else 100)
-            for name in (regular_name, bold_name, _LICENSE_NAME)
+            for name in (regular_name, bold_name, license_name)
         )
         if (
             requested_attr
@@ -231,27 +281,48 @@ def freeze_system_font_webfont(html_path: Path) -> bool:
         ):
             return False
 
-    regular = _resolve_dejavu(source_family, "Book")
-    bold = _resolve_dejavu(source_family, "Bold")
-    license_candidates = (
-        Path("/usr/share/doc/fonts-dejavu-core/copyright"),
-        Path("/usr/share/licenses/ttf-dejavu/LICENSE"),
-        Path("/usr/share/licenses/dejavu-fonts/LICENSE"),
+    bundled_regular = source.get("bundled_regular")
+    bundled_bold = source.get("bundled_bold")
+    bundled_license = source.get("bundled_license")
+    regular = (
+        bundled_regular
+        if isinstance(bundled_regular, Path) and bundled_regular.is_file()
+        else _resolve_exact_family(
+            source_family, str(source["regular_style"]),
+        )
     )
-    license_path = next((p for p in license_candidates if p.is_file()), None)
+    bold = (
+        bundled_bold
+        if isinstance(bundled_bold, Path) and bundled_bold.is_file()
+        else _resolve_exact_family(source_family, str(source["bold_style"]))
+    )
+    license_candidates = source["license_candidates"]
+    license_path = (
+        bundled_license
+        if isinstance(bundled_license, Path) and bundled_license.is_file()
+        else next((p for p in license_candidates if p.is_file()), None)
+    )
     if regular is None or bold is None or license_path is None:
+        # Do not leave an older managed fallback active after this version has
+        # selected a different source family.  If the new licensed face is not
+        # available, removing the stale block genuinely restores the platform
+        # stack promised by the warning.  The renderer treats that removal as
+        # a font mutation and still applies its pre/post figure-fill gate.
+        removed_stale = prior is not None and text_without_fidelity != text
+        if removed_stale:
+            html_path.write_text(text_without_fidelity, encoding="utf-8")
         eprint(
             f"[paper2poster] WARN: {requested_family} is not portable on "
             f"this host: the licensed {source_family} fallback or its license "
             "notice could not be located; continuing with the platform font "
             "stack."
         )
-        return False
+        return removed_stale
 
     out_fonts.mkdir(parents=True, exist_ok=True)
     _copy_public_asset_atomic(regular, out_fonts / regular_name)
     _copy_public_asset_atomic(bold, out_fonts / bold_name)
-    _copy_public_asset_atomic(license_path, out_fonts / _LICENSE_NAME)
+    _copy_public_asset_atomic(license_path, out_fonts / license_name)
 
     block = f'''<style id="poster-font-fidelity" data-fidelity-version="{_FIDELITY_VERSION}" data-requested-family="{requested_family}" data-source-family="{source_family}">
   /* Portable browser fallback. The CSS family name intentionally stays the

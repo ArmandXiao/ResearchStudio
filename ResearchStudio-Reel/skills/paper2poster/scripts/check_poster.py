@@ -319,8 +319,9 @@ def main(argv: list[str] | None = None) -> int:
     # Geometry/fill measurements must use the same deterministic browser face
     # that final rendering will bake into the standalone poster bundle.  In
     # particular, Linux naturally resolves Arial/Times New Roman to Nimbus,
-    # while the portable final mapping uses DejaVu; injecting only at final
-    # render would change wrapping *after* the strict fill gate passed.
+    # while the portable final mapping uses Arimo for Arial and DejaVu for the
+    # remaining OS-family choices; injecting only at final render would change
+    # wrapping *after* the strict fill gate passed.
     if args.cmd in {"pack", "slack", "polish", "autofit"}:
         try:
             freeze_system_font_webfont(Path(args.html).resolve())

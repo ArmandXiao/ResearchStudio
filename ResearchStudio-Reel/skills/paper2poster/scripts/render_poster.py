@@ -528,6 +528,89 @@ def _capture_expand_snapshot(page) -> dict:
     return result
 
 
+def _capture_card_figure_fills(page) -> list[dict]:
+    """Measure every visible card image/figure against its owning section."""
+    snapshot = _capture_expand_snapshot(page)
+    sections = {
+        str(section.get("key", "")): section
+        for section in snapshot.get("sections", [])
+    }
+    rows = []
+    for media in snapshot.get("media", []):
+        section = sections.get(str(media.get("sectionKey", "")))
+        rect = section.get("rect") if section else None
+        section_w = float((rect or {}).get("w", 0.0))
+        section_h = float((rect or {}).get("h", 0.0))
+        if section_w <= 0 or section_h <= 0:
+            continue
+        painted_w = float(media.get("paintedW", 0.0))
+        painted_h = float(media.get("paintedH", 0.0))
+        rows.append({
+            "key": str(media.get("key", "")),
+            "sid": str(media.get("sid", "")),
+            "kind": str(media.get("kind", "")),
+            "src": str(media.get("src", "")),
+            "currentSrc": str(media.get("currentSrc", "")),
+            "fill": max(painted_w / section_w, painted_h / section_h),
+            "widthFill": painted_w / section_w,
+            "heightFill": painted_h / section_h,
+        })
+    return rows
+
+
+def _font_freeze_failures(
+    before: list[dict],
+    after: list[dict],
+    *,
+    floor: float = _EXPAND_FIG_MIN_RATIO,
+    ceiling: float = _EXPAND_FIG_MAX_RATIO,
+) -> list[dict]:
+    """Return identity or fill-band regressions caused by font freezing."""
+    after_by_key = {
+        str(figure.get("key", "")): figure for figure in after
+    }
+    failures = []
+    for original in before:
+        current = after_by_key.get(str(original.get("key", "")))
+        reasons = []
+        if current is None:
+            reasons.append("media disappeared")
+        else:
+            for identity in ("kind", "src", "currentSrc"):
+                if original.get(identity) != current.get(identity):
+                    reasons.append(f"{identity} changed")
+            before_fill = float(original.get("fill", 0.0))
+            current_fill = float(current.get("fill", 0.0))
+            if before_fill + 1e-6 >= floor and current_fill + 1e-6 < floor:
+                reasons.append(
+                    f"fill dropped below floor ({before_fill:.2%} -> "
+                    f"{current_fill:.2%})"
+                )
+            for axis in ("widthFill", "heightFill"):
+                before_axis = float(original.get(axis, 0.0))
+                current_axis = float(current.get(axis, 0.0))
+                if before_axis <= ceiling and current_axis > ceiling:
+                    reasons.append(
+                        f"{axis} overflowed ({before_axis:.2%} -> "
+                        f"{current_axis:.2%})"
+                    )
+        if reasons:
+            failures.append({
+                "before": original,
+                "after": current,
+                "reasons": reasons,
+            })
+    before_keys = {str(figure.get("key", "")) for figure in before}
+    for current in after:
+        if str(current.get("key", "")) not in before_keys:
+            failures.append({
+                "before": None,
+                "after": current,
+                "reasons": ["media appeared"],
+            })
+    return failures
+
+
 def _wait_for_images_decoded(page, *, timeout_ms: int, label: str) -> bool:
     """Wait until every document image has loaded and decoded.
 
@@ -1097,8 +1180,6 @@ def _render_staged(
     _strip_derived_render_styles(html_path)
     _ensure_unscaled_layout_timer_guard(html_path)
     _sync_bundled_fonts(html_path)
-    freeze_system_font_webfont(html_path)
-    _autopack_header_logos(html_path)   # Step 5.9, auto-run so it's never skipped
 
     resolved = _canvas.resolve_canvas(
         html_path, args.canvas, label="[render_preview]"
@@ -1118,6 +1199,103 @@ def _render_staged(
     if pw is None:
         return 2
     sync_playwright, PWTimeoutError = pw
+
+    # Font fidelity runs before logo packing and the expand baseline.  Compare
+    # the same settled page immediately before and after that mutation so a
+    # metric-incompatible fallback cannot silently turn a passing figure into
+    # a sub-90% stamp before the later validator starts observing geometry.
+    _font_gate_error = ""
+    _font_gate_warning = ""
+    with sync_playwright() as p_:
+        _font_browser, _font_ctx, _font_page = _render.open_print_emulated_page(
+            p_, viewport
+        )
+        _prefont_ready = True
+        try:
+            _font_page.goto(
+                html_path.as_uri(), timeout=args.mathjax_timeout_ms,
+            )
+        except PWTimeoutError:
+            _eprint(
+                "[render_preview] WARN: pre-font page did not reach `load` "
+                f"within {args.mathjax_timeout_ms} ms; continuing with the "
+                "bounded settle check."
+            )
+        except Exception as exc:
+            _prefont_ready = False
+            _eprint(
+                "[render_preview] WARN: pre-font page load failed: "
+                f"{ascii_safe(exc)}"
+            )
+        _prefont_ready = (
+            _settle_loaded_durable_page(
+                _font_page,
+                timeout_ms=args.mathjax_timeout_ms,
+                playwright_timeout_error=PWTimeoutError,
+                label="pre-font fidelity baseline",
+            ) and _prefont_ready
+        )
+        try:
+            _prefont_figures = (
+                _capture_card_figure_fills(_font_page)
+                if _prefont_ready else []
+            )
+            _font_changed = freeze_system_font_webfont(html_path)
+            if _font_changed:
+                _postfont_ready = _reload_and_settle_after_bake(
+                    _font_page,
+                    timeout_ms=args.mathjax_timeout_ms,
+                    playwright_timeout_error=PWTimeoutError,
+                    label="post-font fidelity reload",
+                )
+                if not _prefont_ready or not _postfont_ready:
+                    _font_gate_warning = (
+                        "font fidelity changed the staged HTML, but its "
+                        "pre/post geometry could not be settled reliably; "
+                        "continuing on the renderer's existing soft path"
+                    )
+                else:
+                    _postfont_figures = _capture_card_figure_fills(_font_page)
+                    _font_failures = _font_freeze_failures(
+                        _prefont_figures, _postfont_figures,
+                    )
+                    if _font_failures:
+                        _details = []
+                        for _failure in _font_failures:
+                            _before = _failure.get("before") or {}
+                            _after = _failure.get("after") or {}
+                            _label = (
+                                _before.get("sid") or _after.get("sid")
+                                or _before.get("key") or _after.get("key")
+                            )
+                            _details.append(
+                                f"{_label}: "
+                                + ", ".join(_failure.get("reasons") or [])
+                            )
+                        _font_gate_error = (
+                            "font fidelity changed card media outside its "
+                            "accepted identity/fill band: "
+                            + "; ".join(_details)
+                        )
+        except Exception as exc:
+            _font_gate_error = (
+                "font fidelity geometry validation failed: "
+                f"{ascii_safe(exc)}"
+            )
+        finally:
+            _font_browser.close()
+
+    if _font_gate_warning:
+        _eprint(
+            "[render_preview] WARN: " + ascii_safe(_font_gate_warning)
+        )
+    if _font_gate_error:
+        _eprint(
+            "[render_preview] ERROR: " + ascii_safe(_font_gate_error)
+        )
+        return 2
+
+    _autopack_header_logos(html_path)   # Step 5.9, auto-run so it's never skipped
 
     with sync_playwright() as p_:
         browser, ctx, page = _render.open_print_emulated_page(

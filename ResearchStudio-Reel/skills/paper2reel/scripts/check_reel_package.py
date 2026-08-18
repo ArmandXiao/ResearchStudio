@@ -13,12 +13,14 @@ import functools
 import hashlib
 import json
 import re
+import struct
 import sys
 import threading
 import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -107,6 +109,66 @@ DEFAULT_CONTRACT = {
     "min_blog_text_chars": 80,
     "min_download_buttons": 4,
 }
+
+HISTORY_PIXEL_LAYER_TAG_RE = re.compile(
+    r"<img\b(?=[^>]*(?<![\w:-])id\s*=\s*([\"'])poster-history-pixel-layer\1)[^>]*>",
+    re.IGNORECASE,
+)
+HISTORY_DENSITY_MAX_SIDE = 12_000
+HISTORY_DENSITY_MAX_PIXELS = 64_000_000
+HISTORY_DENSITY_MAX_MAE = 6.0
+HISTORY_DENSITY_MAX_RMS = 14.0
+HISTORY_DENSITY_TILE_SIZE = 32
+HISTORY_DENSITY_MAX_TILE_RMS = 30.0
+
+
+class HistoricalRasterMarkupAudit(HTMLParser):
+    """Track whether the historical pixel layer is nested in its host."""
+
+    VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, bool]] = []
+        self.has_host = False
+        self.layer_count = 0
+        self.layer_host_descendant_count = 0
+
+    def _handle_start(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        *,
+        self_closing: bool,
+    ) -> None:
+        values = {name.lower(): value for name, value in attrs}
+        parent_has_host = self.stack[-1][1] if self.stack else False
+        is_host = values.get("data-poster-history-pixel-host") == "1"
+        inside_host = parent_has_host or is_host
+        self.has_host = self.has_host or is_host
+        if values.get("id") == "poster-history-pixel-layer":
+            self.layer_count += 1
+            if parent_has_host:
+                self.layer_host_descendant_count += 1
+        lowered_tag = tag.lower()
+        if not self_closing and lowered_tag not in self.VOID_TAGS:
+            self.stack.append((lowered_tag, inside_host))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._handle_start(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._handle_start(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered_tag = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == lowered_tag:
+                del self.stack[index:]
+                break
 
 
 def utc_now() -> str:
@@ -471,6 +533,248 @@ def validate_local_open_resources(findings: list[dict[str, Any]], poster_html: s
         )
 
 
+def tag_attribute(tag: str, name: str) -> str | None:
+    match = re.search(
+        rf"(?<![\w:-]){re.escape(name)}\s*=\s*([\"'])(.*?)\1",
+        tag,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(2) if match else None
+
+
+def read_png_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(24)
+    except OSError:
+        return None
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", header[16:24])
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def historical_density_similarity(source_png: Path, variant: Path) -> dict[str, Any]:
+    try:
+        from PIL import Image, ImageChops, ImageStat
+
+        with Image.open(source_png) as source_image, Image.open(variant) as variant_image:
+            source = source_image.convert("RGB")
+            candidate = variant_image.convert("RGB")
+        sample_width = min(512, source.width)
+        sample_size = (
+            sample_width,
+            max(1, round(source.height * sample_width / source.width)),
+        )
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        source = source.resize(sample_size, resampling)
+        candidate = candidate.resize(sample_size, resampling)
+        diff = ImageChops.difference(source, candidate)
+        stats = ImageStat.Stat(diff)
+        mean_absolute_delta = sum(stats.mean) / len(stats.mean)
+        rms_delta = (sum(value * value for value in stats.rms) / len(stats.rms)) ** 0.5
+        max_tile_rms = 0.0
+        for top in range(0, diff.height, HISTORY_DENSITY_TILE_SIZE):
+            for left in range(0, diff.width, HISTORY_DENSITY_TILE_SIZE):
+                tile = diff.crop((
+                    left,
+                    top,
+                    min(left + HISTORY_DENSITY_TILE_SIZE, diff.width),
+                    min(top + HISTORY_DENSITY_TILE_SIZE, diff.height),
+                ))
+                tile_stats = ImageStat.Stat(tile)
+                tile_rms = (
+                    sum(value * value for value in tile_stats.rms)
+                    / len(tile_stats.rms)
+                ) ** 0.5
+                max_tile_rms = max(max_tile_rms, tile_rms)
+        return {
+            "matches": (
+                mean_absolute_delta <= HISTORY_DENSITY_MAX_MAE
+                and rms_delta <= HISTORY_DENSITY_MAX_RMS
+                and max_tile_rms <= HISTORY_DENSITY_MAX_TILE_RMS
+            ),
+            "mean_absolute_delta": mean_absolute_delta,
+            "rms_delta": rms_delta,
+            "max_tile_rms": max_tile_rms,
+        }
+    except Exception as exc:
+        return {"matches": False, "error": str(exc)}
+
+
+def validate_historical_raster_assets(
+    findings: list[dict[str, Any]],
+    poster_html: str,
+    poster_path: Path,
+    root: Path,
+) -> None:
+    matches = list(HISTORY_PIXEL_LAYER_TAG_RE.finditer(poster_html))
+    match = matches[0] if matches else None
+    markup_audit = HistoricalRasterMarkupAudit()
+    try:
+        markup_audit.feed(poster_html)
+        markup_audit.close()
+    except Exception:
+        pass
+    has_host = markup_audit.has_host
+    layer_count = max(len(matches), markup_audit.layer_count)
+    if layer_count > 1:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_LAYER_DUPLICATE",
+            "Historical raster pixel layer ID must be unique.",
+            path=rel(poster_path, root),
+            data={"count": layer_count},
+        )
+    if not match:
+        if has_host or layer_count:
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_LAYER_MISSING",
+                "Historical raster host exists without its canonical pixel layer.",
+                path=rel(poster_path, root),
+            )
+        return
+    if not has_host:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_HOST_MISSING",
+            "Historical pixel layer exists without its matching pixel host.",
+            path=rel(poster_path, root),
+        )
+    elif layer_count == 1 and markup_audit.layer_host_descendant_count != 1:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_HOST_MISMATCH",
+            "Historical pixel layer must be a descendant of its matching pixel host.",
+            path=rel(poster_path, root),
+        )
+
+    tag = match.group(0)
+    src = tag_attribute(tag, "src") or ""
+    srcset = tag_attribute(tag, "srcset") or ""
+    density_sources = tag_attribute(tag, "data-paper-reel-density-sources") or ""
+    expected_sha = tag_attribute(tag, "data-historical-png-sha256") or ""
+    if not src or re.match(r"^[a-z][a-z0-9+.-]*:", src, flags=re.IGNORECASE):
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_CANONICAL_SOURCE_INVALID",
+            "Historical pixel layer must use a local canonical PNG source.",
+            path=rel(poster_path, root),
+            data={"src": src},
+        )
+        return
+    canonical = (poster_path.parent / src.split("#", 1)[0].split("?", 1)[0]).resolve()
+    try:
+        canonical.relative_to(poster_path.parent.resolve())
+    except ValueError:
+        canonical = Path("/")
+    dimensions = read_png_dimensions(canonical)
+    if dimensions is None:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_CANONICAL_SOURCE_MISSING",
+            "Historical pixel layer canonical PNG is missing or invalid.",
+            path=src,
+        )
+        return
+    if expected_sha:
+        actual_sha = hashlib.sha256(canonical.read_bytes()).hexdigest()
+        if actual_sha != expected_sha:
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_CANONICAL_HASH_MISMATCH",
+                "Historical pixel layer canonical PNG no longer matches its recorded hash.",
+                path=rel(canonical, root),
+                data={"expected": expected_sha, "actual": actual_sha},
+            )
+
+    if not srcset and not density_sources:
+        add_finding(
+            findings,
+            "WARNING",
+            "HISTORICAL_RASTER_RETINA_UNAVAILABLE",
+            "Historical raster keeps its canonical 1x pixels, but no optional 2x/3x PDF-derived sources are available.",
+            path=rel(poster_path, root),
+        )
+        return
+
+    density_paths: dict[int, Path] = {}
+    density_path_escaped = False
+    for candidate in srcset.split(","):
+        parts = candidate.strip().rsplit(None, 1)
+        if len(parts) != 2 or not re.fullmatch(r"[123]x", parts[1]):
+            continue
+        scale = int(parts[1][0])
+        density_path = (poster_path.parent / parts[0]).resolve()
+        try:
+            density_path.relative_to(poster_path.parent.resolve())
+        except ValueError:
+            density_path_escaped = True
+            continue
+        density_paths[scale] = density_path
+    if (
+        density_path_escaped
+        or density_paths.get(1) != canonical
+        or set(density_paths) != {1, 2, 3}
+        or density_sources != "1,2,3"
+    ):
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_SRCSET_INVALID",
+            "Historical raster srcset must map the unchanged canonical PNG to 1x and include 2x/3x sources.",
+            path=rel(poster_path, root),
+            data={"src": src, "srcset": srcset},
+        )
+    width, height = dimensions
+    for scale in (2, 3):
+        candidate = density_paths.get(scale)
+        actual = read_png_dimensions(candidate) if candidate else None
+        expected = (width * scale, height * scale)
+        oversized = (
+            max(expected) > HISTORY_DENSITY_MAX_SIDE
+            or expected[0] * expected[1] > HISTORY_DENSITY_MAX_PIXELS
+        )
+        if oversized:
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_DENSITY_OVERSIZED",
+                "Historical raster density source exceeds the safe decode limit.",
+                path=rel(candidate, root) if candidate else rel(poster_path, root),
+                data={"scale": scale, "dimensions": list(expected)},
+            )
+            continue
+        if actual != expected:
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_DENSITY_DIMENSIONS_INVALID",
+                f"Historical raster {scale}x source must be the exact {scale}x dimensions of the canonical PNG.",
+                path=rel(candidate, root) if candidate else rel(poster_path, root),
+                data={"scale": scale, "expected": list(expected), "actual": list(actual) if actual else None},
+            )
+            continue
+        similarity = historical_density_similarity(canonical, candidate)
+        if not similarity.get("matches"):
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_DENSITY_CONTENT_MISMATCH",
+                "Historical raster density source does not match the canonical PNG content.",
+                path=rel(candidate, root),
+                data={"scale": scale, **similarity},
+            )
+
+
 def blocks_for_language(section: dict[str, Any], lang: str) -> list[Any]:
     blog = section.get("blog") if isinstance(section.get("blog"), dict) else {}
     blocks = blog.get("blocks") if isinstance(blog.get("blocks"), dict) else {}
@@ -513,6 +817,7 @@ def validate_static(
     download_manifest = validate_download_contract(findings, viewer_dir)
     validate_no_local_paths(findings, html, path=rel(html_path, viewer_dir))
     validate_local_open_resources(findings, poster_html, poster_path, viewer_dir)
+    validate_historical_raster_assets(findings, poster_html, poster_path, viewer_dir)
     required_html_markers = contract.get("required_html_markers") if isinstance(contract.get("required_html_markers"), dict) else {}
     for label, marker in required_html_markers.items():
         if marker not in html:
@@ -1105,6 +1410,570 @@ def validate_browser_seek_interactions(page: Any, findings: list[dict[str, Any]]
         )
 
 
+def screenshot_pixel_delta(before: bytes, after: bytes) -> dict[str, Any]:
+    if before == after:
+        return {"different_pixels": 0, "max_channel_delta": 0}
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageChops
+
+        with Image.open(BytesIO(before)) as before_image, Image.open(BytesIO(after)) as after_image:
+            left = before_image.convert("RGBA")
+            right = after_image.convert("RGBA")
+        if left.size != right.size:
+            return {
+                "different_pixels": -1,
+                "before_size": list(left.size),
+                "after_size": list(right.size),
+            }
+        diff = ImageChops.difference(left, right)
+        changed = 0
+        max_delta = 0
+        pixels = (
+            diff.get_flattened_data()
+            if hasattr(diff, "get_flattened_data")
+            else diff.getdata()
+        )
+        for pixel in pixels:
+            pixel_max = max(pixel)
+            if pixel_max:
+                changed += 1
+                max_delta = max(max_delta, pixel_max)
+        return {
+            "different_pixels": changed,
+            "max_channel_delta": max_delta,
+            "dimensions": list(left.size),
+        }
+    except Exception as exc:
+        return {
+            "different_pixels": -1,
+            "max_channel_delta": None,
+            "error": f"Could not decode browser screenshots with Pillow: {exc}",
+            "before_sha256": hashlib.sha256(before).hexdigest(),
+            "after_sha256": hashlib.sha256(after).hexdigest(),
+        }
+
+
+def screenshot_pixel_delta_valid(delta: Any) -> bool:
+    """Return whether a screenshot comparison produced usable numeric metrics."""
+    if not isinstance(delta, dict) or delta.get("error"):
+        return False
+    different_pixels = delta.get("different_pixels")
+    max_channel_delta = delta.get("max_channel_delta")
+    return bool(
+        isinstance(different_pixels, (int, float))
+        and not isinstance(different_pixels, bool)
+        and different_pixels >= 0
+        and isinstance(max_channel_delta, (int, float))
+        and not isinstance(max_channel_delta, bool)
+        and max_channel_delta >= 0
+    )
+
+
+def raster_proxy_state_valid(proxy: Any, *, section: str) -> bool:
+    if not isinstance(proxy, dict):
+        return False
+    dimensions = (
+        proxy.get("width"),
+        proxy.get("height"),
+        proxy.get("clippedWidth"),
+        proxy.get("clippedHeight"),
+    )
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value >= 2
+        for value in dimensions
+    ):
+        return False
+    width, height, clipped_width, clipped_height = dimensions
+    return bool(
+        proxy.get("display") == "block"
+        and proxy.get("opacity") == "1"
+        and not proxy.get("clickable")
+        and proxy.get("section") == section
+        and proxy.get("targetSection") == section
+        and abs(width - clipped_width) <= 1
+        and abs(height - clipped_height) <= 1
+    )
+
+
+def png_bytes_dimensions(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", data[16:24])
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def stable_locator_screenshot(page: Any, locator: Any) -> bytes:
+    """Wait out tiny compositor changes before using pixels as an idle baseline."""
+    previous = locator.screenshot(type="png", animations="disabled")
+    for _ in range(4):
+        page.wait_for_timeout(100)
+        current = locator.screenshot(type="png", animations="disabled")
+        delta = screenshot_pixel_delta(previous, current)
+        if not screenshot_pixel_delta_valid(delta):
+            previous = current
+            continue
+        changed = int(delta.get("different_pixels") or 0)
+        max_delta = int(delta.get("max_channel_delta") or 0)
+        if changed == 0 or (0 < changed <= 4 and max_delta <= 1):
+            return current
+        previous = current
+    return previous
+
+
+def validate_visible_poster_highlights(
+    page: Any,
+    frame: Any,
+    findings: list[dict[str, Any]],
+    *,
+    label: str,
+) -> None:
+    target_info = frame.evaluate(
+        """() => {
+          document.querySelectorAll('[data-paper-reel-qa-target]').forEach(
+            el => el.removeAttribute('data-paper-reel-qa-target')
+          );
+          const candidates = Array.from(document.querySelectorAll('[data-section].paper-reel-clickable'))
+            .filter(el => !el.matches('button, a, .listen-btn, .listen-title, .listen-all'))
+            .filter(el => !el.closest('.titlebar'))
+            .filter(el => {
+              const r = el.getBoundingClientRect();
+              return r.width > 40 && r.height > 30;
+            });
+          const el = candidates[0];
+          if (!el) return null;
+          el.setAttribute('data-paper-reel-qa-target', '1');
+          return {
+            section:el.getAttribute('data-section') || '',
+            rasterFallback:document.documentElement.getAttribute('data-paper-reel-raster-fallback') === '1'
+          };
+        }"""
+    )
+    if not isinstance(target_info, dict) or not target_info.get("section"):
+        add_finding(
+            findings,
+            "ERROR",
+            "NO_POSTER_HIGHLIGHT_TARGET",
+            f"No poster section was available for the {label} visible-pixel highlight gate.",
+        )
+        return
+
+    target = frame.locator('[data-paper-reel-qa-target="1"]')
+    target.evaluate(
+        "el => el.scrollIntoView({behavior:'instant', block:'center', inline:'center'})"
+    )
+    page.wait_for_timeout(500)
+    before = stable_locator_screenshot(page, target)
+    hover_state = target.evaluate(
+        """el => {
+          const r = el.getBoundingClientRect();
+          el.dispatchEvent(new MouseEvent('mouseenter', {
+            bubbles:true, clientX:r.left + 8, clientY:r.top + 8, view:window
+          }));
+          const tip = document.getElementById('paperReelTip');
+          if (tip) tip.style.opacity = '0';
+          return {
+            section:el.getAttribute('data-section') || '',
+            classApplied:el.classList.contains('paper-reel-hover'),
+            bodyClass:document.body.classList.contains('paper-reel-has-hover')
+          };
+        }"""
+    )
+    page.wait_for_timeout(250)
+    after_hover = target.screenshot(type="png", animations="disabled")
+    hover_delta = screenshot_pixel_delta(before, after_hover)
+    hover_proxy = target.evaluate(
+        """el => {
+          const proxy = document.getElementById('paperReelHoverProxy');
+          if (!proxy) return null;
+          const rect = proxy.getBoundingClientRect();
+          const targetRect = el.getBoundingClientRect();
+          const layer = document.getElementById('poster-history-pixel-layer');
+          const layerRect = layer ? layer.getBoundingClientRect() : null;
+          const clippedWidth = layerRect ? Math.max(0,
+            Math.min(innerWidth, layerRect.right, targetRect.right) -
+            Math.max(0, layerRect.left, targetRect.left)
+          ) : 0;
+          const clippedHeight = layerRect ? Math.max(0,
+            Math.min(innerHeight, layerRect.bottom, targetRect.bottom) -
+            Math.max(0, layerRect.top, targetRect.top)
+          ) : 0;
+          return {
+            display:getComputedStyle(proxy).display,
+            opacity:getComputedStyle(proxy).opacity,
+            width:rect.width,
+            height:rect.height,
+            clippedWidth,
+            clippedHeight,
+            section:proxy.dataset.paperReelSection || '',
+            targetSection:el.getAttribute('data-section') || '',
+            clickable:proxy.classList.contains('paper-reel-clickable')
+          };
+        }"""
+    )
+    hover_delta_valid = screenshot_pixel_delta_valid(hover_delta)
+    hover_changed = int(hover_delta.get("different_pixels") or 0) if hover_delta_valid else -1
+    hover_minimum_changed_pixels = 64 if target_info.get("rasterFallback") else 1
+    if (
+        not isinstance(hover_state, dict)
+        or not hover_state.get("classApplied")
+        or not hover_state.get("bodyClass")
+        or (
+            target_info.get("rasterFallback")
+            and not raster_proxy_state_valid(
+                hover_proxy,
+                section=str(target_info.get("section") or ""),
+            )
+        )
+        or not hover_delta_valid
+        or hover_changed < hover_minimum_changed_pixels
+    ):
+        add_finding(
+            findings,
+            "ERROR",
+            "POSTER_HOVER_NOT_VISUALLY_RENDERED",
+            "Poster hover changed DOM state but did not produce visible pixels.",
+            data={"mode": label, "state": hover_state, "proxy": hover_proxy, "delta": hover_delta},
+        )
+
+    target.evaluate(
+        """el => {
+          el.dispatchEvent(new MouseEvent('mouseleave', {bubbles:true, view:window}));
+          const tip = document.getElementById('paperReelTip');
+          if (tip) tip.style.opacity = '0';
+        }"""
+    )
+    page.wait_for_timeout(250)
+    after_leave = stable_locator_screenshot(page, target)
+    leave_delta = screenshot_pixel_delta(before, after_leave)
+    leave_delta_valid = screenshot_pixel_delta_valid(leave_delta)
+    leave_changed = int(leave_delta.get("different_pixels") or 0) if leave_delta_valid else -1
+    leave_restore_bad = not leave_delta_valid
+    if leave_delta_valid:
+        leave_restore_bad = (
+            leave_changed != 0
+            if target_info.get("rasterFallback")
+            else leave_changed > 4 or int(leave_delta["max_channel_delta"]) > 1
+        )
+    if leave_restore_bad:
+        add_finding(
+            findings,
+            "ERROR",
+            "POSTER_HOVER_IDLE_NOT_RESTORED",
+            "Poster hover did not return to the exact idle pixels after mouseleave.",
+            data={"mode": label, "section": target_info.get("section"), "delta": leave_delta},
+        )
+
+    flash_before = stable_locator_screenshot(page, target)
+    page.evaluate("section => flashPosterSection(section)", target_info["section"])
+    page.wait_for_timeout(180)
+    after_flash = target.screenshot(type="png", animations="disabled")
+    flash_delta = screenshot_pixel_delta(flash_before, after_flash)
+    flash_proxy = target.evaluate(
+        """el => {
+          const proxy = document.getElementById('paperReelFlashProxy');
+          if (!proxy) return null;
+          const rect = proxy.getBoundingClientRect();
+          const targetRect = el.getBoundingClientRect();
+          const layer = document.getElementById('poster-history-pixel-layer');
+          const layerRect = layer ? layer.getBoundingClientRect() : null;
+          const clippedWidth = layerRect ? Math.max(0,
+            Math.min(innerWidth, layerRect.right, targetRect.right) -
+            Math.max(0, layerRect.left, targetRect.left)
+          ) : 0;
+          const clippedHeight = layerRect ? Math.max(0,
+            Math.min(innerHeight, layerRect.bottom, targetRect.bottom) -
+            Math.max(0, layerRect.top, targetRect.top)
+          ) : 0;
+          return {
+            display:getComputedStyle(proxy).display,
+            opacity:getComputedStyle(proxy).opacity,
+            width:rect.width,
+            height:rect.height,
+            clippedWidth,
+            clippedHeight,
+            section:proxy.dataset.paperReelSection || '',
+            targetSection:el.getAttribute('data-section') || '',
+            clickable:proxy.classList.contains('paper-reel-clickable')
+          };
+        }"""
+    )
+    flash_delta_valid = screenshot_pixel_delta_valid(flash_delta)
+    flash_changed = int(flash_delta.get("different_pixels") or 0) if flash_delta_valid else -1
+    flash_minimum_changed_pixels = 64 if target_info.get("rasterFallback") else 1
+    if (
+        (
+            target_info.get("rasterFallback")
+            and not raster_proxy_state_valid(
+                flash_proxy,
+                section=str(target_info.get("section") or ""),
+            )
+        )
+        or not flash_delta_valid
+        or flash_changed < flash_minimum_changed_pixels
+    ):
+        add_finding(
+            findings,
+            "ERROR",
+            "POSTER_FLASH_NOT_VISUALLY_RENDERED",
+            "Poster flash changed DOM state but did not produce visible pixels.",
+            data={"mode": label, "section": target_info.get("section"), "proxy": flash_proxy, "delta": flash_delta},
+    )
+    page.wait_for_timeout(1650)
+    after_flash_timeout = stable_locator_screenshot(page, target)
+    flash_restore_delta = screenshot_pixel_delta(flash_before, after_flash_timeout)
+    flash_restore_state = frame.evaluate(
+        """() => {
+          const proxy = document.getElementById('paperReelFlashProxy');
+          return {
+            activeElements:document.querySelectorAll('.paper-reel-flash').length,
+            proxyDisplay:proxy ? getComputedStyle(proxy).display : 'missing'
+          };
+        }"""
+    )
+    flash_restore_delta_valid = screenshot_pixel_delta_valid(flash_restore_delta)
+    flash_restore_changed = (
+        int(flash_restore_delta.get("different_pixels") or 0)
+        if flash_restore_delta_valid
+        else -1
+    )
+    flash_restore_bad = not flash_restore_delta_valid
+    if flash_restore_delta_valid:
+        flash_restore_bad = (
+            (
+                flash_restore_changed != 0
+                or not isinstance(flash_restore_state, dict)
+                or int(flash_restore_state.get("activeElements") or 0) != 0
+                or flash_restore_state.get("proxyDisplay") != "none"
+            )
+            if target_info.get("rasterFallback")
+            else (
+                flash_restore_changed > 32
+                or int(flash_restore_delta["max_channel_delta"]) > 2
+                or not isinstance(flash_restore_state, dict)
+                or int(flash_restore_state.get("activeElements") or 0) != 0
+            )
+        )
+    if flash_restore_bad:
+        add_finding(
+            findings,
+            "ERROR",
+            "POSTER_FLASH_IDLE_NOT_RESTORED",
+            "Poster flash did not return to its idle DOM and pixel state after timeout.",
+            data={
+                "mode": label,
+                "section": target_info.get("section"),
+                "state": flash_restore_state,
+                "delta": flash_restore_delta,
+            },
+        )
+
+
+def historical_raster_state(frame: Any) -> dict[str, Any]:
+    state = frame.evaluate(
+        """() => {
+          const layer = document.getElementById('poster-history-pixel-layer');
+          if (!layer) return {present:false};
+          const host = layer.closest('[data-poster-history-pixel-host="1"]');
+          const hover = document.getElementById('paperReelHoverProxy');
+          const flash = document.getElementById('paperReelFlashProxy');
+          const resolvedDensitySources = {};
+          for (const candidate of (layer.getAttribute('srcset') || '').split(',')) {
+            const match = candidate.trim().match(/^(.*\\S)\\s+([123]x)$/);
+            if (!match) continue;
+            try {
+              resolvedDensitySources[match[2]] = new URL(match[1], document.baseURI).href;
+            } catch (e) {}
+          }
+          return {
+            present:true,
+            hostValid:Boolean(host),
+            src:layer.getAttribute('src') || '',
+            canonicalSrc:new URL(layer.getAttribute('src') || '', document.baseURI).href,
+            srcset:layer.getAttribute('srcset') || '',
+            resolvedDensitySources,
+            currentSrc:layer.currentSrc || '',
+            complete:layer.complete,
+            naturalWidth:layer.naturalWidth,
+            naturalHeight:layer.naturalHeight,
+            devicePixelRatio:window.devicePixelRatio,
+            cssWidth:layer.getBoundingClientRect().width,
+            cssHeight:layer.getBoundingClientRect().height,
+            densitySources:layer.getAttribute('data-paper-reel-density-sources') || '',
+            imageRendering:getComputedStyle(layer).imageRendering,
+            fallbackMode:document.documentElement.getAttribute('data-paper-reel-raster-fallback') || '',
+            hoverDisplay:hover ? getComputedStyle(hover).display : 'missing',
+            flashDisplay:flash ? getComputedStyle(flash).display : 'missing'
+          };
+        }"""
+    )
+    return state if isinstance(state, dict) else {"present": False}
+
+
+def validate_historical_raster_dpr1(
+    frame: Any,
+    findings: list[dict[str, Any]],
+    *,
+    label: str,
+) -> bool:
+    state = historical_raster_state(frame)
+    if not state.get("present"):
+        return False
+    srcset = str(state.get("srcset") or "")
+    density_sources = str(state.get("densitySources") or "")
+    current_src = str(state.get("currentSrc") or "")
+    has_density_sources = (
+        "1x" in srcset
+        and "2x" in srcset
+        and "3x" in srcset
+        and density_sources == "1,2,3"
+    )
+    if (srcset or density_sources) and not has_density_sources:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_DENSITY_SOURCES_MISSING",
+            "Historical poster raster must keep its canonical 1x src and provide 2x/3x PDF-derived sources.",
+            data={"mode": label, **state},
+        )
+    if not state.get("complete") or int(state.get("naturalWidth") or 0) < 1:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_1X_BROKEN",
+            "Historical poster raster did not load at DPR1.",
+            data={"mode": label, **state},
+        )
+    if current_src != str(state.get("canonicalSrc") or ""):
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_DPR1_SOURCE_CHANGED",
+            "DPR1 must continue to use the original canonical historical PNG.",
+            data={"mode": label, **state},
+        )
+    if (
+        not state.get("hostValid")
+        or state.get("fallbackMode") != "1"
+        or state.get("hoverDisplay") != "none"
+        or state.get("flashDisplay") != "none"
+    ):
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_IDLE_STATE_BAD",
+            "Historical raster fallback must be detected while both highlight proxies remain hidden at idle.",
+            data={"mode": label, **state},
+        )
+    return has_density_sources
+
+
+def validate_historical_raster_high_dpr(
+    browser: Any,
+    url: str,
+    findings: list[dict[str, Any]],
+    *,
+    label: str,
+) -> None:
+    for dpr in (2, 3):
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            device_scale_factor=dpr,
+        )
+        try:
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(1200)
+            frame = page.locator("#posterFrame").element_handle().content_frame()
+            if frame is None:
+                add_finding(
+                    findings,
+                    "ERROR",
+                    "POSTER_IFRAME_NOT_LOADED",
+                    f"Poster iframe did not load for the {label} DPR{dpr} density gate.",
+                )
+                continue
+            frame.wait_for_selector("#poster-history-pixel-layer", state="attached", timeout=5000)
+            frame.wait_for_function(
+                """() => {
+                  const layer = document.getElementById('poster-history-pixel-layer');
+                  return !!(layer && layer.complete && layer.naturalWidth > 0 && layer.currentSrc);
+                }""",
+                timeout=10000,
+            )
+            state = historical_raster_state(frame)
+            layer_png = frame.locator("#poster-history-pixel-layer").screenshot(
+                type="png",
+                animations="disabled",
+            )
+            screenshot_dimensions = png_bytes_dimensions(layer_png)
+            css_width = float(state.get("cssWidth") or 0)
+            css_height = float(state.get("cssHeight") or 0)
+            expected_dimensions = (round(css_width * dpr), round(css_height * dpr))
+            physical_size_ok = bool(
+                screenshot_dimensions
+                and abs(screenshot_dimensions[0] - expected_dimensions[0]) <= 2
+                and abs(screenshot_dimensions[1] - expected_dimensions[1]) <= 2
+            )
+            resolved_density_sources = state.get("resolvedDensitySources")
+            expected_current_src = (
+                resolved_density_sources.get(f"{dpr}x")
+                if isinstance(resolved_density_sources, dict)
+                else None
+            )
+            if (
+                not isinstance(expected_current_src, str)
+                or not expected_current_src
+                or str(state.get("currentSrc") or "") != expected_current_src
+            ):
+                add_finding(
+                    findings,
+                    "ERROR",
+                    "HISTORICAL_RASTER_WRONG_DENSITY_SOURCE",
+                    f"Historical raster did not select its {dpr}x source at DPR{dpr}.",
+                    data={
+                        "mode": label,
+                        "dpr": dpr,
+                        "expectedCurrentSrc": expected_current_src,
+                        **state,
+                    },
+                )
+            if not physical_size_ok or float(state.get("devicePixelRatio") or 0) != dpr:
+                add_finding(
+                    findings,
+                    "ERROR",
+                    "HISTORICAL_RASTER_PHYSICAL_SIZE_WRONG",
+                    f"Historical raster screenshot did not render at DPR{dpr} physical dimensions.",
+                    data={
+                        "mode": label,
+                        "dpr": dpr,
+                        "expected": list(expected_dimensions),
+                        "actual": list(screenshot_dimensions) if screenshot_dimensions else None,
+                        **state,
+                    },
+                )
+            if state.get("imageRendering") != "auto":
+                add_finding(
+                    findings,
+                    "ERROR",
+                    "HISTORICAL_RASTER_HIGH_DPR_PIXELATED",
+                    "High-DPI historical raster must use image-rendering: auto.",
+                    data={"mode": label, "dpr": dpr, **state},
+                )
+        except Exception as exc:
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_DENSITY_GATE_FAILED",
+                f"Could not validate the {label} DPR{dpr} historical raster source.",
+                data={"error": str(exc)},
+            )
+        finally:
+            context.close()
+
+
 def browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contract: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     contract = contract or load_contract()
@@ -1131,6 +2000,7 @@ def browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contract: 
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page(viewport={"width": 1440, "height": 900})
+                has_historical_raster = False
                 page.goto(url, wait_until="domcontentloaded")
                 page.wait_for_timeout(1000)
 
@@ -1224,6 +2094,8 @@ def browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contract: 
                 else:
                     frame.wait_for_selector("[data-section]", state="attached", timeout=5000)
                     frame.wait_for_selector("[data-section].paper-reel-clickable, .titlebar.paper-reel-clickable", state="attached", timeout=5000)
+                    has_historical_raster = validate_historical_raster_dpr1(frame, findings, label="http")
+                    validate_visible_poster_highlights(page, frame, findings, label="http")
                     sid = frame.evaluate(
                         """() => {
                           const candidates = Array.from(document.querySelectorAll('[data-section]'))
@@ -1318,6 +2190,8 @@ def browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contract: 
                 if screenshot:
                     screenshot.parent.mkdir(parents=True, exist_ok=True)
                     page.screenshot(path=str(screenshot), full_page=True)
+                if has_historical_raster:
+                    validate_historical_raster_high_dpr(browser, url, findings, label="http")
                 browser.close()
         except Exception as exc:
             add_finding(findings, "ERROR", "BROWSER_GATE_EXCEPTION", f"Browser reel gate failed: {exc}")
@@ -1353,6 +2227,7 @@ def file_browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contr
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1440, "height": 900})
+            has_historical_raster = False
             page.goto(html_path.as_uri(), wait_until="domcontentloaded")
             page.wait_for_timeout(1200)
 
@@ -1419,6 +2294,7 @@ def file_browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contr
             else:
                 frame.wait_for_selector("[data-section]", state="attached", timeout=5000)
                 frame.wait_for_selector("[data-section].paper-reel-clickable, .titlebar.paper-reel-clickable", state="attached", timeout=5000)
+                has_historical_raster = validate_historical_raster_dpr1(frame, findings, label="file")
                 base_uri = frame.evaluate("() => document.baseURI")
                 if "/assets/poster/" not in str(base_uri):
                     add_finding(findings, "ERROR", "FILE_POSTER_BASE_URI_WRONG", "srcdoc poster must set base href to assets/poster/ so relative resources resolve.", data={"baseURI": base_uri})
@@ -1431,6 +2307,7 @@ def file_browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contr
                 if broken_poster_images:
                     add_finding(findings, "ERROR", "FILE_POSTER_IMAGE_BROKEN", "file-open poster has broken images.", data={"broken": broken_poster_images[:10]})
 
+                validate_visible_poster_highlights(page, frame, findings, label="file")
                 hover_result = frame.evaluate(
                     """() => {
                       const candidates = Array.from(document.querySelectorAll('[data-section].paper-reel-clickable'))
@@ -1563,6 +2440,8 @@ def file_browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contr
             if screenshot:
                 screenshot.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(screenshot), full_page=True)
+            if has_historical_raster:
+                validate_historical_raster_high_dpr(browser, html_path.as_uri(), findings, label="file")
             browser.close()
     except Exception as exc:
         add_finding(findings, "ERROR", "FILE_BROWSER_GATE_EXCEPTION", f"File browser reel gate failed: {exc}")

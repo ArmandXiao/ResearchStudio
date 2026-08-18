@@ -9,6 +9,7 @@ poster HTML and PPTX/slide source untouched.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -83,16 +84,17 @@ KATEX_CDN_REPLACEMENTS = (
     ),
 )
 
-HISTORY_PIXEL_LAYER_TAG_RE = re.compile(
-    r"<img\b(?=[^>]*(?<![\w:-])id\s*=\s*([\"'])poster-history-pixel-layer\1)[^>]*>",
-    re.IGNORECASE,
-)
 HISTORY_DENSITY_MAX_SIDE = 12_000
 HISTORY_DENSITY_MAX_PIXELS = 64_000_000
 HISTORY_DENSITY_MAX_MAE = 6.0
 HISTORY_DENSITY_MAX_RMS = 14.0
 HISTORY_DENSITY_TILE_SIZE = 32
 HISTORY_DENSITY_MAX_TILE_RMS = 30.0
+HISTORY_DENSITY_DETAIL_TILE_SIZE = 128
+HISTORY_DENSITY_DETAIL_TILE_COUNT = 12
+HISTORY_DENSITY_DETAIL_MARGIN = 4
+HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_MAE = 2.0
+HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_RMS = 8.0
 
 HTML_VOID_ELEMENTS = {
     "area",
@@ -115,11 +117,15 @@ HTML_VOID_ELEMENTS = {
 class HistoryPixelLayerContractParser(HTMLParser):
     """Locate the historical layer and verify that its own ancestor is a host."""
 
-    def __init__(self) -> None:
+    def __init__(self, source_text: str) -> None:
         super().__init__(convert_charrefs=True)
         self.stack: list[tuple[str, bool]] = []
         self.host_depth = 0
-        self.layer_contracts: list[tuple[bool, bool]] = []
+        self.layer_contracts: list[tuple[bool, bool, bool, int, int, str]] = []
+        self.line_offsets = [0]
+        self.line_offsets.extend(
+            match.end() for match in re.finditer(r"\n", source_text)
+        )
 
     @staticmethod
     def attribute_values(
@@ -142,13 +148,24 @@ class HistoryPixelLayerContractParser(HTMLParser):
         normalized_tag = tag.lower()
         ids = self.attribute_values(attrs, "id")
         if "poster-history-pixel-layer" in ids:
+            line, column = self.getpos()
+            raw_tag = self.get_starttag_text() or ""
+            start = self.line_offsets[line - 1] + column
             self.layer_contracts.append(
-                (normalized_tag == "img", self.host_depth > 0)
+                (
+                    normalized_tag == "img",
+                    self.host_depth > 0,
+                    ids == ["poster-history-pixel-layer"],
+                    start,
+                    start + len(raw_tag),
+                    raw_tag,
+                )
             )
-        is_host = "1" in self.attribute_values(
+        host_values = self.attribute_values(
             attrs,
             "data-poster-history-pixel-host",
         )
+        is_host = host_values == ["1"]
         if push and normalized_tag not in HTML_VOID_ELEMENTS:
             self.stack.append((normalized_tag, is_host))
             if is_host:
@@ -736,8 +753,9 @@ function hidePaperReelRasterProxy(state, kind) {
   if (proxy) proxy.style.display = 'none';
 }
 function syncPaperReelRasterMode(state) {
-  const layer = state.doc.getElementById('poster-history-pixel-layer');
-  const host = layer && layer.closest('[data-poster-history-pixel-host="1"]');
+  const layers = state.doc.querySelectorAll('[id="poster-history-pixel-layer"]');
+  const layer = layers.length === 1 && layers[0].tagName === 'IMG' ? layers[0] : null;
+  const host = layer && layer.parentElement && layer.parentElement.closest('[data-poster-history-pixel-host="1"]');
   const active = Boolean(layer && host);
   state.rasterLayer = active ? layer : null;
   state.rasterHost = active ? host : null;
@@ -883,7 +901,7 @@ function installPosterTools(doc) {
     #paperReelHoverProxy, #paperReelFlashProxy { position:fixed !important; display:none; box-sizing:border-box; pointer-events:none !important; user-select:none !important; z-index:2147483647 !important; }
     #paperReelHoverProxy { border:3px solid rgba(14,106,110,.96); box-shadow:inset 0 0 0 3px rgba(14,106,110,.56), 0 0 18px rgba(14,106,110,.34); }
     #paperReelFlashProxy { border:4px solid rgba(214,74,54,.92); box-shadow:inset 0 0 0 4px rgba(214,74,54,.36), 0 0 22px rgba(214,74,54,.3); }
-    @media (min-resolution:1.5dppx) { [data-poster-history-pixel-host="1"] #poster-history-pixel-layer[srcset] { image-rendering:auto !important; } }
+    @media (min-resolution:1.5dppx) { :root[data-paper-reel-raster-fallback="1"] [data-poster-history-pixel-host="1"] #poster-history-pixel-layer[srcset] { image-rendering:auto !important; } }
     #paperReelDebug { position:fixed; right:14px; bottom:14px; z-index:2147483646; display:none; background:rgba(255,255,255,.96); border:1px solid #cbd5dc; border-radius:8px; padding:10px; font:12px Arial; box-shadow:0 12px 30px rgba(0,0,0,.2); }
     body.paper-reel-debug #paperReelDebug { display:block; }
   `;
@@ -1154,7 +1172,15 @@ def copy_if_exists(src: Path, dst: Path) -> None:
 
 def is_backup_artifact_name(name: str) -> bool:
     lowered = name.lower()
-    return lowered.endswith((".bak", ".backup")) or ".bak." in lowered
+    return (
+        lowered.endswith((".bak", ".backup"))
+        or ".bak." in lowered
+        or ".backup." in lowered
+        or (
+            lowered.startswith(".")
+            and any(marker in lowered for marker in (".density.", ".render."))
+        )
+    )
 
 
 def ignore_backup_artifacts(_dir: str, names: list[str]) -> set[str]:
@@ -1215,9 +1241,11 @@ def set_html_tag_attribute(tag: str, name: str, value: str) -> str:
     return body + f' {name}="{escaped}"' + closing
 
 
-def unique_hosted_history_pixel_layer_tag(text: str) -> re.Match[str] | None:
+def unique_hosted_history_pixel_layer_tag(
+    text: str,
+) -> tuple[str, int, int] | None:
     """Return the one eligible layer tag, rejecting duplicate or unhosted IDs."""
-    parser = HistoryPixelLayerContractParser()
+    parser = HistoryPixelLayerContractParser(text)
     try:
         parser.feed(text)
         parser.close()
@@ -1228,15 +1256,23 @@ def unique_hosted_history_pixel_layer_tag(text: str) -> re.Match[str] | None:
         )
         return None
 
-    matches = list(HISTORY_PIXEL_LAYER_TAG_RE.finditer(text))
-    if len(parser.layer_contracts) != 1 or len(matches) != 1:
-        if parser.layer_contracts or matches:
+    if len(parser.layer_contracts) != 1:
+        if parser.layer_contracts:
             print(
                 "[paper2reel] WARNING: Retina sources require exactly one "
                 "#poster-history-pixel-layer; preserving the poster unchanged"
             )
         return None
-    is_image, inside_host = parser.layer_contracts[0]
+    is_image, inside_host, unambiguous_id, start, end, raw_tag = (
+        parser.layer_contracts[0]
+    )
+    if not unambiguous_id:
+        print(
+            "[paper2reel] WARNING: Retina sources require exactly one id "
+            "attribute on #poster-history-pixel-layer; preserving the poster "
+            "unchanged"
+        )
+        return None
     if not is_image:
         print(
             "[paper2reel] WARNING: Retina sources require "
@@ -1251,7 +1287,13 @@ def unique_hosted_history_pixel_layer_tag(text: str) -> re.Match[str] | None:
             "preserving the poster unchanged"
         )
         return None
-    return matches[0]
+    if not raw_tag or text[start:end] != raw_tag:
+        print(
+            "[paper2reel] WARNING: could not isolate the historical pixel layer "
+            "tag; preserving the poster unchanged"
+        )
+        return None
+    return raw_tag, start, end
 
 
 def png_dimensions(path: Path) -> tuple[int, int] | None:
@@ -1281,6 +1323,110 @@ def local_history_pixel_source(poster_out: Path, tag: str) -> Path | None:
     return candidate if candidate.is_file() and candidate.suffix.lower() == ".png" else None
 
 
+def density_source_resample_metrics(
+    source: Any,
+    candidate: Any,
+    image_module: Any,
+    image_chops: Any,
+    image_stat: Any,
+) -> dict[str, Any]:
+    """Detect a density candidate that is only a conventional 1x resize."""
+    if (
+        candidate.width % source.width
+        or candidate.height % source.height
+        or candidate.width // source.width != candidate.height // source.height
+    ):
+        return {"trivial_upscale": True, "error": "non-integral density scale"}
+    scale = candidate.width // source.width
+    if scale not in (2, 3):
+        return {"trivial_upscale": True, "error": f"unsupported density scale {scale}"}
+
+    ranked_tiles: list[tuple[float, tuple[int, int, int, int]]] = []
+    tile_size = HISTORY_DENSITY_DETAIL_TILE_SIZE
+    for top in range(0, source.height, tile_size):
+        for left in range(0, source.width, tile_size):
+            right = min(left + tile_size, source.width)
+            bottom = min(top + tile_size, source.height)
+            grayscale = source.crop((left, top, right, bottom)).convert("L")
+            stats = image_stat.Stat(grayscale)
+            variance = stats.var[0] if stats.var else 0.0
+            ranked_tiles.append(
+                (variance * (right - left) * (bottom - top), (left, top, right, bottom))
+            )
+    boxes = [
+        box
+        for _, box in sorted(ranked_tiles, key=lambda item: item[0], reverse=True)[
+            :HISTORY_DENSITY_DETAIL_TILE_COUNT
+        ]
+    ]
+
+    resampling = getattr(image_module, "Resampling", image_module)
+    methods: list[tuple[str, Any]] = []
+    for name in ("NEAREST", "BOX", "BILINEAR", "HAMMING", "BICUBIC", "LANCZOS"):
+        method = getattr(resampling, name, None)
+        if method is not None and all(method != existing for _, existing in methods):
+            methods.append((name.lower(), method))
+
+    comparisons: list[dict[str, Any]] = []
+    margin = HISTORY_DENSITY_DETAIL_MARGIN
+    for name, method in methods:
+        absolute_total = 0.0
+        square_total = 0.0
+        channel_samples = 0
+        for left, top, right, bottom in boxes:
+            expanded_left = max(0, left - margin)
+            expanded_top = max(0, top - margin)
+            expanded_right = min(source.width, right + margin)
+            expanded_bottom = min(source.height, bottom + margin)
+            source_crop = source.crop(
+                (expanded_left, expanded_top, expanded_right, expanded_bottom)
+            )
+            reference = source_crop.resize(
+                (source_crop.width * scale, source_crop.height * scale),
+                method,
+            ).crop(
+                (
+                    (left - expanded_left) * scale,
+                    (top - expanded_top) * scale,
+                    (right - expanded_left) * scale,
+                    (bottom - expanded_top) * scale,
+                )
+            )
+            actual = candidate.crop(
+                (left * scale, top * scale, right * scale, bottom * scale)
+            )
+            stats = image_stat.Stat(image_chops.difference(actual, reference))
+            pixels = actual.width * actual.height
+            absolute_total += sum(stats.mean) * pixels
+            square_total += sum(value * value for value in stats.rms) * pixels
+            channel_samples += len(stats.mean) * pixels
+        comparisons.append(
+            {
+                "method": name,
+                "mae": absolute_total / channel_samples,
+                "rms": (square_total / channel_samples) ** 0.5,
+            }
+        )
+
+    closest = min(
+        comparisons,
+        key=lambda item: max(
+            item["mae"] / HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_MAE,
+            item["rms"] / HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_RMS,
+        ),
+    )
+    return {
+        "trivial_upscale": any(
+            item["mae"] <= HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_MAE
+            and item["rms"] <= HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_RMS
+            for item in comparisons
+        ),
+        "closest_resample": closest["method"],
+        "closest_resample_mae": closest["mae"],
+        "closest_resample_rms": closest["rms"],
+    }
+
+
 def render_pdf_density_variant(
     pdf: Path,
     source_png: Path,
@@ -1303,7 +1449,7 @@ def render_pdf_density_variant(
         )
         return None
     with tempfile.NamedTemporaryFile(
-        prefix=f".{target.stem}.",
+        prefix=f".{target.stem}.render.",
         suffix=".png",
         dir=target.parent,
         delete=False,
@@ -1333,6 +1479,12 @@ def render_pdf_density_variant(
         detail = (result.stderr or result.stdout or "pdftoppm returned invalid output").strip()
         print(f"[paper2reel] WARNING: could not render {scale}x historical poster raster: {detail}")
         return None
+    try:
+        shutil.copymode(source_png, temporary)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        print(f"[paper2reel] WARNING: could not prepare {scale}x historical poster raster: {exc}")
+        return None
     return temporary
 
 
@@ -1342,16 +1494,23 @@ def density_variant_matches_canonical(source_png: Path, variant: Path) -> bool:
         from PIL import Image, ImageChops, ImageStat
 
         with Image.open(source_png) as source_image, Image.open(variant) as variant_image:
-            source = source_image.convert("RGB")
-            candidate = variant_image.convert("RGB")
-        sample_width = min(512, source.width)
+            source_full = source_image.convert("RGB")
+            candidate_full = variant_image.convert("RGB")
+        source_resample = density_source_resample_metrics(
+            source_full,
+            candidate_full,
+            Image,
+            ImageChops,
+            ImageStat,
+        )
+        sample_width = min(512, source_full.width)
         sample_size = (
             sample_width,
-            max(1, round(source.height * sample_width / source.width)),
+            max(1, round(source_full.height * sample_width / source_full.width)),
         )
         resampling = getattr(Image, "Resampling", Image).LANCZOS
-        source = source.resize(sample_size, resampling)
-        candidate = candidate.resize(sample_size, resampling)
+        source = source_full.resize(sample_size, resampling)
+        candidate = candidate_full.resize(sample_size, resampling)
         difference = ImageChops.difference(source, candidate)
         stats = ImageStat.Stat(difference)
         mean_absolute_delta = sum(stats.mean) / len(stats.mean)
@@ -1386,6 +1545,7 @@ def density_variant_matches_canonical(source_png: Path, variant: Path) -> bool:
         mean_absolute_delta <= HISTORY_DENSITY_MAX_MAE
         and rms_delta <= HISTORY_DENSITY_MAX_RMS
         and max_tile_rms <= HISTORY_DENSITY_MAX_TILE_RMS
+        and not source_resample.get("trivial_upscale", True)
     )
     if not matches:
         print(
@@ -1393,7 +1553,10 @@ def density_variant_matches_canonical(source_png: Path, variant: Path) -> bool:
             "canonical historical PNG "
             f"(mean delta {mean_absolute_delta:.2f}, RMS {rms_delta:.2f}, "
             f"max {HISTORY_DENSITY_TILE_SIZE}x{HISTORY_DENSITY_TILE_SIZE} "
-            f"tile RMS {max_tile_rms:.2f})"
+            f"tile RMS {max_tile_rms:.2f}, closest canonical resize "
+            f"{source_resample.get('closest_resample', 'unknown')} "
+            f"MAE {float(source_resample.get('closest_resample_mae') or 0):.2f}, "
+            f"RMS {float(source_resample.get('closest_resample_rms') or 0):.2f})"
         )
     return matches
 
@@ -1420,13 +1583,15 @@ def install_history_density_transaction(
     preserve_backups = False
     try:
         html_temporary.write_text(updated_text, encoding="utf-8")
-        for _, target, _ in variants:
+        shutil.copymode(poster_html, html_temporary)
+        for temporary, target, _ in variants:
             if target.exists() or target.is_symlink():
                 if not target.is_file():
                     raise OSError(f"Retina target is not a regular file: {target}")
                 backup = reserve_neighbor_temp_path(target, "backup")
                 try:
                     shutil.copy2(target, backup)
+                    shutil.copymode(target, temporary)
                 except OSError:
                     backup.unlink(missing_ok=True)
                     raise
@@ -1483,10 +1648,36 @@ def install_history_pixel_density_sources(poster_dir: Path, poster_out: Path) ->
     """
     poster_html = poster_out / "poster.html"
     text = poster_html.read_text(encoding="utf-8")
-    match = unique_hosted_history_pixel_layer_tag(text)
-    if not match:
+    layer_contract = unique_hosted_history_pixel_layer_tag(text)
+    if not layer_contract:
         return
-    source_png = local_history_pixel_source(poster_out, match.group(0))
+    layer_tag, layer_start, layer_end = layer_contract
+    source_png = local_history_pixel_source(poster_out, layer_tag)
+    expected_sha = html_tag_attribute(
+        layer_tag,
+        "data-historical-png-sha256",
+    )
+    if source_png is not None:
+        if not expected_sha or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha):
+            print(
+                "[paper2reel] historical pixel layer is missing its canonical "
+                "PNG SHA-256; preserving the poster without density variants"
+            )
+            return
+        try:
+            actual_sha = hashlib.sha256(source_png.read_bytes()).hexdigest()
+        except OSError as exc:
+            print(
+                "[paper2reel] could not verify the canonical historical PNG; "
+                f"preserving the poster without density variants: {exc}"
+            )
+            return
+        if actual_sha != expected_sha.lower():
+            print(
+                "[paper2reel] canonical historical PNG SHA-256 mismatch; "
+                "preserving the poster without density variants"
+            )
+            return
     pdf = poster_dir / "poster.pdf"
     pdftoppm = shutil.which("pdftoppm")
     if source_png is None or not pdf.is_file() or not pdftoppm:
@@ -1529,13 +1720,13 @@ def install_history_pixel_density_sources(poster_dir: Path, poster_out: Path) ->
         f"{path.relative_to(poster_out).as_posix()} {scale}x"
         for path, scale in sources
     )
-    updated_tag = set_html_tag_attribute(match.group(0), "srcset", srcset)
+    updated_tag = set_html_tag_attribute(layer_tag, "srcset", srcset)
     updated_tag = set_html_tag_attribute(
         updated_tag,
         "data-paper-reel-density-sources",
         ",".join(str(scale) for _, scale in sources),
     )
-    updated_text = text[: match.start()] + updated_tag + text[match.end() :]
+    updated_text = text[:layer_start] + updated_tag + text[layer_end:]
     if not install_history_density_transaction(
         poster_html,
         updated_text,

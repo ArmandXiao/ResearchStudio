@@ -110,16 +110,17 @@ DEFAULT_CONTRACT = {
     "min_download_buttons": 4,
 }
 
-HISTORY_PIXEL_LAYER_TAG_RE = re.compile(
-    r"<img\b(?=[^>]*(?<![\w:-])id\s*=\s*([\"'])poster-history-pixel-layer\1)[^>]*>",
-    re.IGNORECASE,
-)
 HISTORY_DENSITY_MAX_SIDE = 12_000
 HISTORY_DENSITY_MAX_PIXELS = 64_000_000
 HISTORY_DENSITY_MAX_MAE = 6.0
 HISTORY_DENSITY_MAX_RMS = 14.0
 HISTORY_DENSITY_TILE_SIZE = 32
 HISTORY_DENSITY_MAX_TILE_RMS = 30.0
+HISTORY_DENSITY_DETAIL_TILE_SIZE = 128
+HISTORY_DENSITY_DETAIL_TILE_COUNT = 12
+HISTORY_DENSITY_DETAIL_MARGIN = 4
+HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_MAE = 2.0
+HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_RMS = 8.0
 
 
 class HistoricalRasterMarkupAudit(HTMLParser):
@@ -136,6 +137,9 @@ class HistoricalRasterMarkupAudit(HTMLParser):
         self.has_host = False
         self.layer_count = 0
         self.layer_host_descendant_count = 0
+        self.layer_tags: list[tuple[str, str]] = []
+        self.ambiguous_layer_id_count = 0
+        self.ambiguous_host_count = 0
 
     def _handle_start(
         self,
@@ -144,16 +148,27 @@ class HistoricalRasterMarkupAudit(HTMLParser):
         *,
         self_closing: bool,
     ) -> None:
-        values = {name.lower(): value for name, value in attrs}
+        values: dict[str, list[str]] = {}
+        for name, value in attrs:
+            values.setdefault(name.lower(), []).append(value or "")
+        lowered_tag = tag.lower()
         parent_has_host = self.stack[-1][1] if self.stack else False
-        is_host = values.get("data-poster-history-pixel-host") == "1"
+        host_values = values.get("data-poster-history-pixel-host", [])
+        is_host = host_values == ["1"]
+        if len(host_values) > 1 and "1" in host_values:
+            self.ambiguous_host_count += 1
         inside_host = parent_has_host or is_host
         self.has_host = self.has_host or is_host
-        if values.get("id") == "poster-history-pixel-layer":
+        ids = values.get("id", [])
+        if "poster-history-pixel-layer" in ids:
             self.layer_count += 1
+            if ids != ["poster-history-pixel-layer"]:
+                self.ambiguous_layer_id_count += 1
+            self.layer_tags.append(
+                (lowered_tag, self.get_starttag_text() or "")
+            )
             if parent_has_host:
                 self.layer_host_descendant_count += 1
-        lowered_tag = tag.lower()
         if not self_closing and lowered_tag not in self.VOID_TAGS:
             self.stack.append((lowered_tag, inside_host))
 
@@ -258,6 +273,19 @@ def validate_no_local_paths(findings: list[dict[str, Any]], text: str, *, path: 
             return
 
 
+def is_internal_artifact_name(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered.endswith((".bak", ".backup"))
+        or ".bak." in lowered
+        or ".backup." in lowered
+        or (
+            lowered.startswith(".")
+            and any(marker in lowered for marker in (".density.", ".render."))
+        )
+    )
+
+
 def validate_no_backup_files(findings: list[dict[str, Any]], viewer_dir: Path) -> None:
     scan_roots = [
         viewer_dir / "reel.html",
@@ -277,8 +305,7 @@ def validate_no_backup_files(findings: list[dict[str, Any]], viewer_dir: Path) -
     for path in paths:
         if not path.is_file():
             continue
-        lowered = path.name.lower()
-        if lowered.endswith((".bak", ".backup")) or ".bak." in lowered:
+        if is_internal_artifact_name(path.name):
             add_finding(
                 findings,
                 "ERROR",
@@ -289,8 +316,7 @@ def validate_no_backup_files(findings: list[dict[str, Any]], viewer_dir: Path) -
 
 
 def is_backup_archive_name(name: str) -> bool:
-    lowered = name.lower()
-    return lowered.endswith((".bak", ".backup")) or ".bak." in lowered
+    return is_internal_artifact_name(name)
 
 
 def archive_internal_names(names: list[str]) -> list[str]:
@@ -554,21 +580,132 @@ def read_png_dimensions(path: Path) -> tuple[int, int] | None:
     return (width, height) if width > 0 and height > 0 else None
 
 
+def density_source_resample_metrics(
+    source: Any,
+    candidate: Any,
+    image_module: Any,
+    image_chops: Any,
+    image_stat: Any,
+) -> dict[str, Any]:
+    """Detect a density candidate that is only a conventional 1x resize."""
+    if (
+        candidate.width % source.width
+        or candidate.height % source.height
+        or candidate.width // source.width != candidate.height // source.height
+    ):
+        return {"trivial_upscale": True, "error": "non-integral density scale"}
+    scale = candidate.width // source.width
+    if scale not in (2, 3):
+        return {"trivial_upscale": True, "error": f"unsupported density scale {scale}"}
+
+    ranked_tiles: list[tuple[float, tuple[int, int, int, int]]] = []
+    tile_size = HISTORY_DENSITY_DETAIL_TILE_SIZE
+    for top in range(0, source.height, tile_size):
+        for left in range(0, source.width, tile_size):
+            right = min(left + tile_size, source.width)
+            bottom = min(top + tile_size, source.height)
+            grayscale = source.crop((left, top, right, bottom)).convert("L")
+            stats = image_stat.Stat(grayscale)
+            variance = stats.var[0] if stats.var else 0.0
+            ranked_tiles.append(
+                (variance * (right - left) * (bottom - top), (left, top, right, bottom))
+            )
+    boxes = [
+        box
+        for _, box in sorted(ranked_tiles, key=lambda item: item[0], reverse=True)[
+            :HISTORY_DENSITY_DETAIL_TILE_COUNT
+        ]
+    ]
+
+    resampling = getattr(image_module, "Resampling", image_module)
+    methods: list[tuple[str, Any]] = []
+    for name in ("NEAREST", "BOX", "BILINEAR", "HAMMING", "BICUBIC", "LANCZOS"):
+        method = getattr(resampling, name, None)
+        if method is not None and all(method != existing for _, existing in methods):
+            methods.append((name.lower(), method))
+
+    comparisons: list[dict[str, Any]] = []
+    margin = HISTORY_DENSITY_DETAIL_MARGIN
+    for name, method in methods:
+        absolute_total = 0.0
+        square_total = 0.0
+        channel_samples = 0
+        for left, top, right, bottom in boxes:
+            expanded_left = max(0, left - margin)
+            expanded_top = max(0, top - margin)
+            expanded_right = min(source.width, right + margin)
+            expanded_bottom = min(source.height, bottom + margin)
+            source_crop = source.crop(
+                (expanded_left, expanded_top, expanded_right, expanded_bottom)
+            )
+            reference = source_crop.resize(
+                (source_crop.width * scale, source_crop.height * scale),
+                method,
+            ).crop(
+                (
+                    (left - expanded_left) * scale,
+                    (top - expanded_top) * scale,
+                    (right - expanded_left) * scale,
+                    (bottom - expanded_top) * scale,
+                )
+            )
+            actual = candidate.crop(
+                (left * scale, top * scale, right * scale, bottom * scale)
+            )
+            stats = image_stat.Stat(image_chops.difference(actual, reference))
+            pixels = actual.width * actual.height
+            absolute_total += sum(stats.mean) * pixels
+            square_total += sum(value * value for value in stats.rms) * pixels
+            channel_samples += len(stats.mean) * pixels
+        comparisons.append(
+            {
+                "method": name,
+                "mae": absolute_total / channel_samples,
+                "rms": (square_total / channel_samples) ** 0.5,
+            }
+        )
+
+    closest = min(
+        comparisons,
+        key=lambda item: max(
+            item["mae"] / HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_MAE,
+            item["rms"] / HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_RMS,
+        ),
+    )
+    return {
+        "trivial_upscale": any(
+            item["mae"] <= HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_MAE
+            and item["rms"] <= HISTORY_DENSITY_TRIVIAL_UPSCALE_MAX_RMS
+            for item in comparisons
+        ),
+        "closest_resample": closest["method"],
+        "closest_resample_mae": closest["mae"],
+        "closest_resample_rms": closest["rms"],
+    }
+
+
 def historical_density_similarity(source_png: Path, variant: Path) -> dict[str, Any]:
     try:
         from PIL import Image, ImageChops, ImageStat
 
         with Image.open(source_png) as source_image, Image.open(variant) as variant_image:
-            source = source_image.convert("RGB")
-            candidate = variant_image.convert("RGB")
-        sample_width = min(512, source.width)
+            source_full = source_image.convert("RGB")
+            candidate_full = variant_image.convert("RGB")
+        source_resample = density_source_resample_metrics(
+            source_full,
+            candidate_full,
+            Image,
+            ImageChops,
+            ImageStat,
+        )
+        sample_width = min(512, source_full.width)
         sample_size = (
             sample_width,
-            max(1, round(source.height * sample_width / source.width)),
+            max(1, round(source_full.height * sample_width / source_full.width)),
         )
         resampling = getattr(Image, "Resampling", Image).LANCZOS
-        source = source.resize(sample_size, resampling)
-        candidate = candidate.resize(sample_size, resampling)
+        source = source_full.resize(sample_size, resampling)
+        candidate = candidate_full.resize(sample_size, resampling)
         diff = ImageChops.difference(source, candidate)
         stats = ImageStat.Stat(diff)
         mean_absolute_delta = sum(stats.mean) / len(stats.mean)
@@ -593,10 +730,12 @@ def historical_density_similarity(source_png: Path, variant: Path) -> dict[str, 
                 mean_absolute_delta <= HISTORY_DENSITY_MAX_MAE
                 and rms_delta <= HISTORY_DENSITY_MAX_RMS
                 and max_tile_rms <= HISTORY_DENSITY_MAX_TILE_RMS
+                and not source_resample.get("trivial_upscale", True)
             ),
             "mean_absolute_delta": mean_absolute_delta,
             "rms_delta": rms_delta,
             "max_tile_rms": max_tile_rms,
+            **source_resample,
         }
     except Exception as exc:
         return {"matches": False, "error": str(exc)}
@@ -608,8 +747,6 @@ def validate_historical_raster_assets(
     poster_path: Path,
     root: Path,
 ) -> None:
-    matches = list(HISTORY_PIXEL_LAYER_TAG_RE.finditer(poster_html))
-    match = matches[0] if matches else None
     markup_audit = HistoricalRasterMarkupAudit()
     try:
         markup_audit.feed(poster_html)
@@ -617,7 +754,16 @@ def validate_historical_raster_assets(
     except Exception:
         pass
     has_host = markup_audit.has_host
-    layer_count = max(len(matches), markup_audit.layer_count)
+    layer_count = markup_audit.layer_count
+    if markup_audit.ambiguous_host_count:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_HOST_ATTRIBUTE_DUPLICATE",
+            "Historical raster hosts must use exactly one unambiguous contract attribute.",
+            path=rel(poster_path, root),
+            data={"count": markup_audit.ambiguous_host_count},
+        )
     if layer_count > 1:
         add_finding(
             findings,
@@ -627,8 +773,19 @@ def validate_historical_raster_assets(
             path=rel(poster_path, root),
             data={"count": layer_count},
         )
-    if not match:
-        if has_host or layer_count:
+        return
+    if markup_audit.ambiguous_layer_id_count:
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_LAYER_ID_AMBIGUOUS",
+            "Historical raster pixel layer must use exactly one unambiguous id attribute.",
+            path=rel(poster_path, root),
+            data={"count": markup_audit.ambiguous_layer_id_count},
+        )
+        return
+    if layer_count == 0:
+        if has_host:
             add_finding(
                 findings,
                 "ERROR",
@@ -636,6 +793,16 @@ def validate_historical_raster_assets(
                 "Historical raster host exists without its canonical pixel layer.",
                 path=rel(poster_path, root),
             )
+        return
+    layer_tag_name, tag = markup_audit.layer_tags[0]
+    if layer_tag_name != "img":
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_LAYER_NOT_IMAGE",
+            "Historical raster pixel layer must be an img element.",
+            path=rel(poster_path, root),
+        )
         return
     if not has_host:
         add_finding(
@@ -654,7 +821,6 @@ def validate_historical_raster_assets(
             path=rel(poster_path, root),
         )
 
-    tag = match.group(0)
     src = tag_attribute(tag, "src") or ""
     srcset = tag_attribute(tag, "srcset") or ""
     density_sources = tag_attribute(tag, "data-paper-reel-density-sources") or ""
@@ -684,9 +850,18 @@ def validate_historical_raster_assets(
             path=src,
         )
         return
-    if expected_sha:
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha):
+        add_finding(
+            findings,
+            "ERROR",
+            "HISTORICAL_RASTER_CANONICAL_HASH_MISSING",
+            "Historical pixel layer must record its canonical PNG SHA-256.",
+            path=rel(poster_path, root),
+            data={"value": expected_sha},
+        )
+    else:
         actual_sha = hashlib.sha256(canonical.read_bytes()).hexdigest()
-        if actual_sha != expected_sha:
+        if actual_sha != expected_sha.lower():
             add_finding(
                 findings,
                 "ERROR",
@@ -697,6 +872,20 @@ def validate_historical_raster_assets(
             )
 
     if not srcset and not density_sources:
+        orphaned = [
+            canonical.with_name(f"{canonical.stem}@{scale}x.png")
+            for scale in (2, 3)
+            if canonical.with_name(f"{canonical.stem}@{scale}x.png").exists()
+        ]
+        if orphaned:
+            add_finding(
+                findings,
+                "ERROR",
+                "HISTORICAL_RASTER_DENSITY_ORPHANED",
+                "Historical raster density files exist without the transactional HTML srcset update.",
+                path=rel(poster_path, root),
+                data={"files": [rel(path, root) for path in orphaned]},
+            )
         add_finding(
             findings,
             "WARNING",

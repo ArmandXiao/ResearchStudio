@@ -1659,6 +1659,139 @@ def screenshot_pixel_delta_valid(delta: Any) -> bool:
     )
 
 
+def screenshot_spotlight_delta(
+    before: bytes,
+    after: bytes,
+    geometry: Any,
+) -> dict[str, Any]:
+    """Measure raster spotlight pixels inside and outside its focus cutout."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+
+        with (
+            Image.open(BytesIO(before)) as before_image,
+            Image.open(BytesIO(after)) as after_image,
+        ):
+            left_image = before_image.convert("RGBA")
+            right_image = after_image.convert("RGBA")
+        if left_image.size != right_image.size:
+            return {
+                "error": "Spotlight screenshots have different dimensions.",
+                "before_size": list(left_image.size),
+                "after_size": list(right_image.size),
+            }
+        if not isinstance(geometry, dict):
+            return {"error": "Spotlight geometry is missing."}
+        layer_width = float(geometry.get("layerWidth") or 0)
+        layer_height = float(geometry.get("layerHeight") or 0)
+        focus_left = float(geometry.get("relativeLeft") or 0)
+        focus_top = float(geometry.get("relativeTop") or 0)
+        focus_width = float(geometry.get("width") or 0)
+        focus_height = float(geometry.get("height") or 0)
+        if min(layer_width, layer_height, focus_width, focus_height) <= 0:
+            return {"error": "Spotlight geometry has non-positive dimensions."}
+
+        image_width, image_height = left_image.size
+        scale_x = image_width / layer_width
+        scale_y = image_height / layer_height
+        focus_box = (
+            max(0, min(image_width, round(focus_left * scale_x))),
+            max(0, min(image_height, round(focus_top * scale_y))),
+            max(0, min(image_width, round((focus_left + focus_width) * scale_x))),
+            max(0, min(image_height, round((focus_top + focus_height) * scale_y))),
+        )
+        if focus_box[2] <= focus_box[0] or focus_box[3] <= focus_box[1]:
+            return {
+                "error": "Spotlight focus box is empty.",
+                "focus_box": list(focus_box),
+            }
+
+        changed_pixels = 0
+        focus_changed_pixels = 0
+        outside_changed_pixels = 0
+        outside_toward_white_pixels = 0
+        outside_away_from_white_pixels = 0
+        max_channel_delta = 0
+        left_pixels = (
+            left_image.get_flattened_data()
+            if hasattr(left_image, "get_flattened_data")
+            else left_image.getdata()
+        )
+        right_pixels = (
+            right_image.get_flattened_data()
+            if hasattr(right_image, "get_flattened_data")
+            else right_image.getdata()
+        )
+        focus_x0, focus_y0, focus_x1, focus_y1 = focus_box
+        for index, (left_pixel, right_pixel) in enumerate(
+            zip(left_pixels, right_pixels)
+        ):
+            channel_delta = max(
+                abs(int(left_pixel[channel]) - int(right_pixel[channel]))
+                for channel in range(4)
+            )
+            if not channel_delta:
+                continue
+            changed_pixels += 1
+            max_channel_delta = max(max_channel_delta, channel_delta)
+            y, x = divmod(index, image_width)
+            if focus_x0 <= x < focus_x1 and focus_y0 <= y < focus_y1:
+                focus_changed_pixels += 1
+                continue
+            outside_changed_pixels += 1
+            before_white_distance = sum(
+                255 - int(value) for value in left_pixel[:3]
+            )
+            after_white_distance = sum(
+                255 - int(value) for value in right_pixel[:3]
+            )
+            if after_white_distance + 2 < before_white_distance:
+                outside_toward_white_pixels += 1
+            elif after_white_distance > before_white_distance + 2:
+                outside_away_from_white_pixels += 1
+        return {
+            "different_pixels": changed_pixels,
+            "focus_changed_pixels": focus_changed_pixels,
+            "outside_changed_pixels": outside_changed_pixels,
+            "outside_toward_white_pixels": outside_toward_white_pixels,
+            "outside_away_from_white_pixels": outside_away_from_white_pixels,
+            "max_channel_delta": max_channel_delta,
+            "dimensions": [image_width, image_height],
+            "focus_box": list(focus_box),
+        }
+    except Exception as exc:
+        return {"error": f"Could not measure raster spotlight pixels: {exc}"}
+
+
+def raster_hover_spotlight_valid(proxy: Any, delta: Any) -> bool:
+    if not isinstance(proxy, dict) or not screenshot_pixel_delta_valid(delta):
+        return False
+    border_color = str(proxy.get("borderColor") or "")
+    color_match = re.fullmatch(
+        r"rgba?\(\s*([0-9.]+)[, ]+\s*([0-9.]+)[, ]+\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)",
+        border_color,
+    )
+    if not color_match:
+        return False
+    red, green, blue = (float(color_match.group(index)) for index in range(1, 4))
+    alpha = float(color_match.group(4) or 1)
+    outside_changed = int(delta.get("outside_changed_pixels") or 0)
+    toward_white = int(delta.get("outside_toward_white_pixels") or 0)
+    away_from_white = int(delta.get("outside_away_from_white_pixels") or 0)
+    return bool(
+        min(red, green, blue) >= 240
+        and max(red, green, blue) - min(red, green, blue) <= 4
+        and alpha >= 0.8
+        and str(proxy.get("borderStyle") or "") == "solid"
+        and 1 <= float(proxy.get("borderWidth") or 0) <= 3
+        and str(proxy.get("boxShadow") or "") != "none"
+        and outside_changed >= 256
+        and toward_white >= max(128, int(outside_changed * 0.75))
+        and away_from_white <= max(128, int(outside_changed * 0.2))
+    )
+
+
 def raster_proxy_state_valid(proxy: Any, *, section: str) -> bool:
     if not isinstance(proxy, dict):
         return False
@@ -1755,6 +1888,16 @@ def validate_visible_poster_highlights(
     )
     page.wait_for_timeout(500)
     before = stable_locator_screenshot(page, target)
+    raster_surface = (
+        frame.locator("#poster-history-pixel-layer")
+        if target_info.get("rasterFallback")
+        else None
+    )
+    raster_before = (
+        stable_locator_screenshot(page, raster_surface)
+        if raster_surface is not None
+        else None
+    )
     hover_state = target.evaluate(
         """el => {
           const r = el.getBoundingClientRect();
@@ -1772,6 +1915,11 @@ def validate_visible_poster_highlights(
     )
     page.wait_for_timeout(250)
     after_hover = target.screenshot(type="png", animations="disabled")
+    raster_after_hover = (
+        raster_surface.screenshot(type="png", animations="disabled")
+        if raster_surface is not None
+        else None
+    )
     hover_delta = screenshot_pixel_delta(before, after_hover)
     hover_proxy = target.evaluate(
         """el => {
@@ -1792,10 +1940,18 @@ def validate_visible_poster_highlights(
           return {
             display:getComputedStyle(proxy).display,
             opacity:getComputedStyle(proxy).opacity,
+            borderColor:getComputedStyle(proxy).borderTopColor,
+            borderStyle:getComputedStyle(proxy).borderTopStyle,
+            borderWidth:parseFloat(getComputedStyle(proxy).borderTopWidth) || 0,
+            boxShadow:getComputedStyle(proxy).boxShadow,
             width:rect.width,
             height:rect.height,
             clippedWidth,
             clippedHeight,
+            relativeLeft:layerRect ? rect.left - layerRect.left : 0,
+            relativeTop:layerRect ? rect.top - layerRect.top : 0,
+            layerWidth:layerRect ? layerRect.width : 0,
+            layerHeight:layerRect ? layerRect.height : 0,
             section:proxy.dataset.paperReelSection || '',
             targetSection:el.getAttribute('data-section') || '',
             clickable:proxy.classList.contains('paper-reel-clickable')
@@ -1805,6 +1961,11 @@ def validate_visible_poster_highlights(
     hover_delta_valid = screenshot_pixel_delta_valid(hover_delta)
     hover_changed = int(hover_delta.get("different_pixels") or 0) if hover_delta_valid else -1
     hover_minimum_changed_pixels = 64 if target_info.get("rasterFallback") else 1
+    hover_spotlight_delta = (
+        screenshot_spotlight_delta(raster_before, raster_after_hover, hover_proxy)
+        if raster_before is not None and raster_after_hover is not None
+        else None
+    )
     if (
         not isinstance(hover_state, dict)
         or not hover_state.get("classApplied")
@@ -1816,6 +1977,10 @@ def validate_visible_poster_highlights(
                 section=str(target_info.get("section") or ""),
             )
         )
+        or (
+            target_info.get("rasterFallback")
+            and not raster_hover_spotlight_valid(hover_proxy, hover_spotlight_delta)
+        )
         or not hover_delta_valid
         or hover_changed < hover_minimum_changed_pixels
     ):
@@ -1823,8 +1988,14 @@ def validate_visible_poster_highlights(
             findings,
             "ERROR",
             "POSTER_HOVER_NOT_VISUALLY_RENDERED",
-            "Poster hover changed DOM state but did not produce visible pixels.",
-            data={"mode": label, "state": hover_state, "proxy": hover_proxy, "delta": hover_delta},
+            "Poster hover must render a visible native highlight or a neutral historical-raster spotlight.",
+            data={
+                "mode": label,
+                "state": hover_state,
+                "proxy": hover_proxy,
+                "delta": hover_delta,
+                "spotlight_delta": hover_spotlight_delta,
+            },
         )
 
     target.evaluate(
@@ -1837,22 +2008,42 @@ def validate_visible_poster_highlights(
     page.wait_for_timeout(250)
     after_leave = stable_locator_screenshot(page, target)
     leave_delta = screenshot_pixel_delta(before, after_leave)
+    raster_after_leave = (
+        stable_locator_screenshot(page, raster_surface)
+        if raster_surface is not None
+        else None
+    )
+    raster_leave_delta = (
+        screenshot_pixel_delta(raster_before, raster_after_leave)
+        if raster_before is not None and raster_after_leave is not None
+        else None
+    )
     leave_delta_valid = screenshot_pixel_delta_valid(leave_delta)
     leave_changed = int(leave_delta.get("different_pixels") or 0) if leave_delta_valid else -1
     leave_restore_bad = not leave_delta_valid
     if leave_delta_valid:
-        leave_restore_bad = (
-            leave_changed != 0
-            if target_info.get("rasterFallback")
-            else leave_changed > 4 or int(leave_delta["max_channel_delta"]) > 1
-        )
+        if target_info.get("rasterFallback"):
+            leave_restore_bad = bool(
+                leave_changed != 0
+                or not screenshot_pixel_delta_valid(raster_leave_delta)
+                or int(raster_leave_delta.get("different_pixels") or 0) != 0
+            )
+        else:
+            leave_restore_bad = bool(
+                leave_changed > 4 or int(leave_delta["max_channel_delta"]) > 1
+            )
     if leave_restore_bad:
         add_finding(
             findings,
             "ERROR",
             "POSTER_HOVER_IDLE_NOT_RESTORED",
             "Poster hover did not return to the exact idle pixels after mouseleave.",
-            data={"mode": label, "section": target_info.get("section"), "delta": leave_delta},
+            data={
+                "mode": label,
+                "section": target_info.get("section"),
+                "delta": leave_delta,
+                "raster_delta": raster_leave_delta,
+            },
         )
 
     flash_before = stable_locator_screenshot(page, target)

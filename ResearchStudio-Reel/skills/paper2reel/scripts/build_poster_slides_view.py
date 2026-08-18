@@ -898,8 +898,8 @@ function installPosterTools(doc) {
     .titlebar.paper-reel-hover { filter:brightness(1.04); }
     [data-section].paper-reel-flash { border-color:rgba(214,74,54,.72) !important; box-shadow:inset 0 0 0 7px rgba(214,74,54,.46), 0 0 20px rgba(214,74,54,.16) !important; }
     .titlebar.paper-reel-flash { filter:brightness(1.08); }
-    #paperReelHoverProxy, #paperReelFlashProxy { position:fixed !important; display:none; box-sizing:border-box; pointer-events:none !important; user-select:none !important; z-index:2147483647 !important; }
-    #paperReelHoverProxy { border:3px solid rgba(14,106,110,.96); box-shadow:inset 0 0 0 3px rgba(14,106,110,.56), 0 0 18px rgba(14,106,110,.34); }
+    #paperReelHoverProxy, #paperReelFlashProxy { position:fixed !important; display:none; box-sizing:border-box; background:transparent !important; pointer-events:none !important; user-select:none !important; z-index:2147483647 !important; }
+    #paperReelHoverProxy { border:2px solid rgba(255,255,255,.96); box-shadow:0 0 18px rgba(15,23,42,.16), 0 0 0 100vmax rgb(255 255 255 / calc(1 - var(--paper-reel-dim-opacity,.48))); }
     #paperReelFlashProxy { border:4px solid rgba(214,74,54,.92); box-shadow:inset 0 0 0 4px rgba(214,74,54,.36), 0 0 22px rgba(214,74,54,.3); }
     @media (min-resolution:1.5dppx) { :root[data-paper-reel-raster-fallback="1"] [data-poster-history-pixel-host="1"] #poster-history-pixel-layer[srcset] { image-rendering:auto !important; } }
     #paperReelDebug { position:fixed; right:14px; bottom:14px; z-index:2147483646; display:none; background:rgba(255,255,255,.96); border:1px solid #cbd5dc; border-radius:8px; padding:10px; font:12px Arial; box-shadow:0 12px 30px rgba(0,0,0,.2); }

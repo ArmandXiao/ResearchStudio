@@ -12,6 +12,7 @@ import argparse
 import functools
 import hashlib
 import json
+import math
 import re
 import struct
 import sys
@@ -1707,8 +1708,31 @@ def screenshot_spotlight_delta(
                 "focus_box": list(focus_box),
             }
 
+        border_width = max(0.0, float(geometry.get("borderWidth") or 0))
+        focus_pixel_width = focus_box[2] - focus_box[0]
+        focus_pixel_height = focus_box[3] - focus_box[1]
+        core_inset_x = max(
+            math.ceil((border_width + 2) * scale_x),
+            round(focus_pixel_width * 0.2),
+        )
+        core_inset_y = max(
+            math.ceil((border_width + 2) * scale_y),
+            round(focus_pixel_height * 0.2),
+        )
+        focus_core_box = (
+            focus_box[0] + core_inset_x,
+            focus_box[1] + core_inset_y,
+            focus_box[2] - core_inset_x,
+            focus_box[3] - core_inset_y,
+        )
+        focus_core_pixels = max(0, focus_core_box[2] - focus_core_box[0]) * max(
+            0, focus_core_box[3] - focus_core_box[1]
+        )
+
         changed_pixels = 0
         focus_changed_pixels = 0
+        focus_core_changed_pixels = 0
+        focus_core_max_channel_delta = 0
         outside_changed_pixels = 0
         outside_toward_white_pixels = 0
         outside_away_from_white_pixels = 0
@@ -1738,6 +1762,14 @@ def screenshot_spotlight_delta(
             y, x = divmod(index, image_width)
             if focus_x0 <= x < focus_x1 and focus_y0 <= y < focus_y1:
                 focus_changed_pixels += 1
+                if (
+                    focus_core_box[0] <= x < focus_core_box[2]
+                    and focus_core_box[1] <= y < focus_core_box[3]
+                ):
+                    focus_core_changed_pixels += 1
+                    focus_core_max_channel_delta = max(
+                        focus_core_max_channel_delta, channel_delta
+                    )
                 continue
             outside_changed_pixels += 1
             before_white_distance = sum(
@@ -1753,12 +1785,16 @@ def screenshot_spotlight_delta(
         return {
             "different_pixels": changed_pixels,
             "focus_changed_pixels": focus_changed_pixels,
+            "focus_core_pixels": focus_core_pixels,
+            "focus_core_changed_pixels": focus_core_changed_pixels,
+            "focus_core_max_channel_delta": focus_core_max_channel_delta,
             "outside_changed_pixels": outside_changed_pixels,
             "outside_toward_white_pixels": outside_toward_white_pixels,
             "outside_away_from_white_pixels": outside_away_from_white_pixels,
             "max_channel_delta": max_channel_delta,
             "dimensions": [image_width, image_height],
             "focus_box": list(focus_box),
+            "focus_core_box": list(focus_core_box),
         }
     except Exception as exc:
         return {"error": f"Could not measure raster spotlight pixels: {exc}"}
@@ -1779,6 +1815,9 @@ def raster_hover_spotlight_valid(proxy: Any, delta: Any) -> bool:
     outside_changed = int(delta.get("outside_changed_pixels") or 0)
     toward_white = int(delta.get("outside_toward_white_pixels") or 0)
     away_from_white = int(delta.get("outside_away_from_white_pixels") or 0)
+    focus_core_pixels = int(delta.get("focus_core_pixels") or 0)
+    focus_core_changed = int(delta.get("focus_core_changed_pixels") or 0)
+    focus_core_max_delta = int(delta.get("focus_core_max_channel_delta") or 0)
     return bool(
         min(red, green, blue) >= 240
         and max(red, green, blue) - min(red, green, blue) <= 4
@@ -1786,6 +1825,9 @@ def raster_hover_spotlight_valid(proxy: Any, delta: Any) -> bool:
         and str(proxy.get("borderStyle") or "") == "solid"
         and 1 <= float(proxy.get("borderWidth") or 0) <= 3
         and str(proxy.get("boxShadow") or "") != "none"
+        and focus_core_pixels >= 64
+        and focus_core_changed <= 4
+        and focus_core_max_delta <= 1
         and outside_changed >= 256
         and toward_white >= max(128, int(outside_changed * 0.75))
         and away_from_white <= max(128, int(outside_changed * 0.2))

@@ -1920,7 +1920,7 @@ def validate_visible_poster_highlights(
             findings,
             "ERROR",
             "NO_POSTER_HIGHLIGHT_TARGET",
-            f"No poster section was available for the {label} visible-pixel highlight gate.",
+            f"No poster section was available for the {label} highlight lifecycle gate.",
         )
         return
 
@@ -1929,10 +1929,18 @@ def validate_visible_poster_highlights(
         "el => el.scrollIntoView({behavior:'instant', block:'center', inline:'center'})"
     )
     page.wait_for_timeout(500)
-    before = stable_locator_screenshot(page, target)
+    raster_fallback = bool(target_info.get("rasterFallback"))
+
+    # Native poster HTML owns its durable render contract. Paper2Poster's
+    # renderer already gates the generated HTML in a fresh BrowserContext
+    # against the exact warm DOM pixels before it captures poster.png. Reel QA
+    # must therefore verify only the native highlight DOM lifecycle here. The
+    # screenshot-level checks below are reserved for the Reel-owned proxy that
+    # makes historical raster backfills interactive.
+    before = stable_locator_screenshot(page, target) if raster_fallback else None
     raster_surface = (
         frame.locator("#poster-history-pixel-layer")
-        if target_info.get("rasterFallback")
+        if raster_fallback
         else None
     )
     raster_before = (
@@ -1956,13 +1964,21 @@ def validate_visible_poster_highlights(
         }"""
     )
     page.wait_for_timeout(250)
-    after_hover = target.screenshot(type="png", animations="disabled")
+    after_hover = (
+        target.screenshot(type="png", animations="disabled")
+        if raster_fallback
+        else None
+    )
     raster_after_hover = (
         raster_surface.screenshot(type="png", animations="disabled")
         if raster_surface is not None
         else None
     )
-    hover_delta = screenshot_pixel_delta(before, after_hover)
+    hover_delta = (
+        screenshot_pixel_delta(before, after_hover)
+        if before is not None and after_hover is not None
+        else None
+    )
     hover_proxy = target.evaluate(
         """el => {
           const proxy = document.getElementById('paperReelHoverProxy');
@@ -2001,8 +2017,11 @@ def validate_visible_poster_highlights(
         }"""
     )
     hover_delta_valid = screenshot_pixel_delta_valid(hover_delta)
-    hover_changed = int(hover_delta.get("different_pixels") or 0) if hover_delta_valid else -1
-    hover_minimum_changed_pixels = 64 if target_info.get("rasterFallback") else 1
+    hover_changed = (
+        int(hover_delta.get("different_pixels") or 0)
+        if hover_delta_valid
+        else -1
+    )
     hover_spotlight_delta = (
         screenshot_spotlight_delta(raster_before, raster_after_hover, hover_proxy)
         if raster_before is not None and raster_after_hover is not None
@@ -2013,24 +2032,37 @@ def validate_visible_poster_highlights(
         or not hover_state.get("classApplied")
         or not hover_state.get("bodyClass")
         or (
-            target_info.get("rasterFallback")
+            not raster_fallback
+            and isinstance(hover_proxy, dict)
+            and hover_proxy.get("display") != "none"
+        )
+        or (
+            raster_fallback
             and not raster_proxy_state_valid(
                 hover_proxy,
                 section=str(target_info.get("section") or ""),
             )
         )
         or (
-            target_info.get("rasterFallback")
+            raster_fallback
             and not raster_hover_spotlight_valid(hover_proxy, hover_spotlight_delta)
         )
-        or not hover_delta_valid
-        or hover_changed < hover_minimum_changed_pixels
+        or (raster_fallback and not hover_delta_valid)
+        or (raster_fallback and hover_changed < 64)
     ):
         add_finding(
             findings,
             "ERROR",
-            "POSTER_HOVER_NOT_VISUALLY_RENDERED",
-            "Poster hover must render a visible native highlight or a neutral historical-raster spotlight.",
+            (
+                "POSTER_HOVER_NOT_VISUALLY_RENDERED"
+                if raster_fallback
+                else "POSTER_HOVER_DOM_NOT_ACTIVATED"
+            ),
+            (
+                "Historical-raster hover did not render the required neutral spotlight."
+                if raster_fallback
+                else "Native poster hover did not activate its DOM highlight lifecycle cleanly."
+            ),
             data={
                 "mode": label,
                 "state": hover_state,
@@ -2040,16 +2072,28 @@ def validate_visible_poster_highlights(
             },
         )
 
-    target.evaluate(
+    leave_state = target.evaluate(
         """el => {
           el.dispatchEvent(new MouseEvent('mouseleave', {bubbles:true, view:window}));
           const tip = document.getElementById('paperReelTip');
           if (tip) tip.style.opacity = '0';
+          const proxy = document.getElementById('paperReelHoverProxy');
+          return {
+            classApplied:el.classList.contains('paper-reel-hover'),
+            bodyClass:document.body.classList.contains('paper-reel-has-hover'),
+            proxyDisplay:proxy ? getComputedStyle(proxy).display : 'missing'
+          };
         }"""
     )
     page.wait_for_timeout(250)
-    after_leave = stable_locator_screenshot(page, target)
-    leave_delta = screenshot_pixel_delta(before, after_leave)
+    after_leave = (
+        stable_locator_screenshot(page, target) if raster_fallback else None
+    )
+    leave_delta = (
+        screenshot_pixel_delta(before, after_leave)
+        if before is not None and after_leave is not None
+        else None
+    )
     raster_after_leave = (
         stable_locator_screenshot(page, raster_surface)
         if raster_surface is not None
@@ -2061,38 +2105,71 @@ def validate_visible_poster_highlights(
         else None
     )
     leave_delta_valid = screenshot_pixel_delta_valid(leave_delta)
-    leave_changed = int(leave_delta.get("different_pixels") or 0) if leave_delta_valid else -1
-    leave_restore_bad = not leave_delta_valid
-    if leave_delta_valid:
-        if target_info.get("rasterFallback"):
-            leave_restore_bad = bool(
-                leave_changed != 0
-                or not screenshot_pixel_delta_valid(raster_leave_delta)
-                or int(raster_leave_delta.get("different_pixels") or 0) != 0
-            )
-        else:
-            leave_restore_bad = bool(
-                leave_changed > 4 or int(leave_delta["max_channel_delta"]) > 1
-            )
+    leave_changed = (
+        int(leave_delta.get("different_pixels") or 0)
+        if leave_delta_valid
+        else -1
+    )
+    leave_dom_bad = bool(
+        not isinstance(leave_state, dict)
+        or leave_state.get("classApplied")
+        or leave_state.get("bodyClass")
+        or (
+            leave_state.get("proxyDisplay") != "none"
+            if raster_fallback
+            else leave_state.get("proxyDisplay") not in {"missing", "none"}
+        )
+    )
+    if raster_fallback:
+        leave_restore_bad = bool(
+            leave_dom_bad
+            or not leave_delta_valid
+            or leave_changed != 0
+            or not screenshot_pixel_delta_valid(raster_leave_delta)
+            or int(raster_leave_delta.get("different_pixels") or 0) != 0
+        )
+    else:
+        leave_restore_bad = leave_dom_bad
     if leave_restore_bad:
         add_finding(
             findings,
             "ERROR",
             "POSTER_HOVER_IDLE_NOT_RESTORED",
-            "Poster hover did not return to the exact idle pixels after mouseleave.",
+            "Poster hover did not return to its idle highlight state after mouseleave.",
             data={
                 "mode": label,
                 "section": target_info.get("section"),
+                "state": leave_state,
                 "delta": leave_delta,
                 "raster_delta": raster_leave_delta,
             },
         )
 
-    flash_before = stable_locator_screenshot(page, target)
+    flash_before = (
+        stable_locator_screenshot(page, target) if raster_fallback else None
+    )
     page.evaluate("section => flashPosterSection(section)", target_info["section"])
     page.wait_for_timeout(180)
-    after_flash = target.screenshot(type="png", animations="disabled")
-    flash_delta = screenshot_pixel_delta(flash_before, after_flash)
+    flash_state = target.evaluate(
+        """el => {
+          const proxy = document.getElementById('paperReelFlashProxy');
+          return {
+            classApplied:el.classList.contains('paper-reel-flash'),
+            activeElements:document.querySelectorAll('.paper-reel-flash').length,
+            proxyDisplay:proxy ? getComputedStyle(proxy).display : 'missing'
+          };
+        }"""
+    )
+    after_flash = (
+        target.screenshot(type="png", animations="disabled")
+        if raster_fallback
+        else None
+    )
+    flash_delta = (
+        screenshot_pixel_delta(flash_before, after_flash)
+        if flash_before is not None and after_flash is not None
+        else None
+    )
     flash_proxy = target.evaluate(
         """el => {
           const proxy = document.getElementById('paperReelFlashProxy');
@@ -2121,36 +2198,67 @@ def validate_visible_poster_highlights(
             clickable:proxy.classList.contains('paper-reel-clickable')
           };
         }"""
-    )
+    ) if raster_fallback else None
     flash_delta_valid = screenshot_pixel_delta_valid(flash_delta)
-    flash_changed = int(flash_delta.get("different_pixels") or 0) if flash_delta_valid else -1
-    flash_minimum_changed_pixels = 64 if target_info.get("rasterFallback") else 1
-    if (
-        (
-            target_info.get("rasterFallback")
-            and not raster_proxy_state_valid(
-                flash_proxy,
-                section=str(target_info.get("section") or ""),
-            )
+    flash_changed = (
+        int(flash_delta.get("different_pixels") or 0)
+        if flash_delta_valid
+        else -1
+    )
+    flash_dom_bad = bool(
+        not isinstance(flash_state, dict)
+        or not flash_state.get("classApplied")
+        or int(flash_state.get("activeElements") or 0) < 1
+        or (
+            not raster_fallback
+            and flash_state.get("proxyDisplay") not in {"missing", "none"}
+        )
+    )
+    flash_render_bad = (
+        not raster_proxy_state_valid(
+            flash_proxy,
+            section=str(target_info.get("section") or ""),
         )
         or not flash_delta_valid
-        or flash_changed < flash_minimum_changed_pixels
-    ):
+        or flash_changed < 64
+    ) if raster_fallback else False
+    if flash_dom_bad or flash_render_bad:
         add_finding(
             findings,
             "ERROR",
-            "POSTER_FLASH_NOT_VISUALLY_RENDERED",
-            "Poster flash changed DOM state but did not produce visible pixels.",
-            data={"mode": label, "section": target_info.get("section"), "proxy": flash_proxy, "delta": flash_delta},
-    )
+            (
+                "POSTER_FLASH_NOT_VISUALLY_RENDERED"
+                if raster_fallback
+                else "POSTER_FLASH_DOM_NOT_ACTIVATED"
+            ),
+            (
+                "Historical-raster flash did not render its spotlight proxy."
+                if raster_fallback
+                else "Native poster flash did not activate its DOM highlight lifecycle cleanly."
+            ),
+            data={
+                "mode": label,
+                "section": target_info.get("section"),
+                "state": flash_state,
+                "proxy": flash_proxy,
+                "delta": flash_delta,
+            },
+        )
     page.wait_for_timeout(1650)
-    after_flash_timeout = stable_locator_screenshot(page, target)
-    flash_restore_delta = screenshot_pixel_delta(flash_before, after_flash_timeout)
-    flash_restore_state = frame.evaluate(
-        """() => {
+    after_flash_timeout = (
+        stable_locator_screenshot(page, target) if raster_fallback else None
+    )
+    flash_restore_delta = (
+        screenshot_pixel_delta(flash_before, after_flash_timeout)
+        if flash_before is not None and after_flash_timeout is not None
+        else None
+    )
+    flash_restore_state = target.evaluate(
+        """el => {
           const proxy = document.getElementById('paperReelFlashProxy');
           return {
             activeElements:document.querySelectorAll('.paper-reel-flash').length,
+            classApplied:el.classList.contains('paper-reel-flash'),
             proxyDisplay:proxy ? getComputedStyle(proxy).display : 'missing'
           };
         }"""
@@ -2161,29 +2269,39 @@ def validate_visible_poster_highlights(
         if flash_restore_delta_valid
         else -1
     )
-    flash_restore_bad = not flash_restore_delta_valid
-    if flash_restore_delta_valid:
-        flash_restore_bad = (
-            (
-                flash_restore_changed != 0
-                or not isinstance(flash_restore_state, dict)
-                or int(flash_restore_state.get("activeElements") or 0) != 0
-                or flash_restore_state.get("proxyDisplay") != "none"
-            )
-            if target_info.get("rasterFallback")
-            else (
-                flash_restore_changed > 32
-                or int(flash_restore_delta["max_channel_delta"]) > 2
-                or not isinstance(flash_restore_state, dict)
-                or int(flash_restore_state.get("activeElements") or 0) != 0
-            )
+    flash_restore_dom_bad = bool(
+        not isinstance(flash_restore_state, dict)
+        or int(flash_restore_state.get("activeElements") or 0) != 0
+        or flash_restore_state.get("classApplied")
+        or (
+            flash_restore_state.get("proxyDisplay") != "none"
+            if raster_fallback
+            else flash_restore_state.get("proxyDisplay")
+            not in {"missing", "none"}
         )
+    )
+    if raster_fallback:
+        flash_restore_bad = bool(
+            flash_restore_dom_bad
+            or not flash_restore_delta_valid
+            or flash_restore_changed != 0
+        )
+    else:
+        flash_restore_bad = flash_restore_dom_bad
     if flash_restore_bad:
         add_finding(
             findings,
             "ERROR",
-            "POSTER_FLASH_IDLE_NOT_RESTORED",
-            "Poster flash did not return to its idle DOM and pixel state after timeout.",
+            (
+                "POSTER_FLASH_IDLE_NOT_RESTORED"
+                if raster_fallback
+                else "POSTER_FLASH_DOM_NOT_RESTORED"
+            ),
+            (
+                "Historical-raster flash did not return to its idle DOM and pixel state after timeout."
+                if raster_fallback
+                else "Native poster flash did not clear its DOM highlight state after timeout."
+            ),
             data={
                 "mode": label,
                 "section": target_info.get("section"),

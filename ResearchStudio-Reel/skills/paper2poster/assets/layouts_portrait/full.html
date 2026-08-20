@@ -45,6 +45,10 @@
     --accent: #1d3a87;
     --accent-soft: #e8edf7;
     --callout: #ae2622;
+    /* Portrait Full Method rail. Keep its contrast independent of the card
+       style: compose_poster.py injects --accent-ink from the resolved theme. */
+    --method-title-bg: var(--accent);
+    --method-title-fg: var(--accent-ink, #ffffff);
     /* Highlight ring for the section currently being narrated (audio playback).
        Defaults to the red callout, but a JS hook at the end of <body> overrides it
        to CONTRAST the VI theme accent — blue VI (#1d3a87) -> red ring, red VI
@@ -683,14 +687,11 @@
   .method-hero {
     flex: 0 0 auto;
   }
-  /* SIDE-TITLE for the Method centerpiece (Portrait Full sandwich layout,
-     2026-06-16). The h2 'METHOD' rotates vertical-rl on the LEFT, and the
-     bullets + figure live in a content column on the right. Magazine-
-     style editorial layout — visually distinguishes the Method
-     centerpiece from regular section cards (which keep horizontal h2 at
-     top). The existing .method-body grid (1fr 1.6fr) becomes the right
-     content column; the section gets its own outer 2-col grid (vertical
-     title | content). */
+  /* SIDE-TITLE for the Method centerpiece (Portrait Full sandwich layout).
+     The h2 is an accent-filled rail on the LEFT. Only .method-title-label is
+     rotated; the Listen button remains horizontal in normal flow at the rail
+     foot, so it cannot inherit an upside-down transform or cover Method
+     content. The bullets + figure live in the right content column. */
   .method-hero .section[data-section="method"] {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -699,33 +700,61 @@
     position: relative;
   }
   .method-hero .section[data-section="method"] > h2 {
-    writing-mode: vertical-rl;
-    transform: rotate(180deg);
+    writing-mode: horizontal-tb;
+    transform: none;
     font-size: 64pt;
     font-weight: 800;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--method-title-fg);
+    background: var(--method-title-bg);
     margin: 0;
     padding: 8pt 14pt;
-    border-right: 6pt solid var(--accent);
+    border: 0;
+    border-radius: 6pt;
     align-self: stretch;
     text-align: center;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     /* h2's normal ::before underline made no sense in vertical mode — kill it. */
   }
   .method-hero .section[data-section="method"] > h2::before { display: none; }
-  /* Listen button needs to break out of the rotated h2 — anchor it to the
-     section's top-right with normal horizontal orientation. */
+  .method-hero .section[data-section="method"] > h2 .method-title-label {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: center;
+    justify-content: center;
+  }
+  /* The Method Listen control belongs to the title rail instead of floating
+     over the content grid. It stays readable across all themes and styles. */
   .method-hero .section[data-section="method"] > h2 .listen-btn {
-    position: absolute;
+    position: static;
     writing-mode: horizontal-tb;
     transform: none;
-    top: 12pt;
-    right: 12pt;
-    z-index: 1;
+    inset: auto;
+    z-index: auto;
+    flex: 0 0 auto;
+    margin-top: 12pt;
+    padding: 0.35em 0.65em;
+    white-space: nowrap;
+    font-size: 24pt;
+    letter-spacing: 0.02em;
+    line-height: 1;
+    text-transform: none;
+    color: var(--accent);
+    background: var(--method-title-fg);
+    border-color: var(--method-title-fg);
+  }
+  .method-hero .section[data-section="method"] > h2 .listen-btn:hover,
+  .method-hero .section[data-section="method"] > h2 .listen-btn.playing {
+    color: #ffffff;
+    background: var(--callout);
+    border-color: #ffffff;
   }
   .method-hero .section[data-section="method"] > .method-body {
     display: grid;
@@ -1331,19 +1360,18 @@
     box-shadow: none; overflow: visible;
   }
   /* The Method side-title is structural, not a style banner. Reset Landscape
-     tag/framed treatments so text never becomes accent-on-accent. */
+     tag/framed treatments and keep a theme-aware contrast pair on the rail. */
   body[data-poster-orientation="portrait"]
     .method-hero .section[data-section="method"] > h2 {
-    writing-mode: vertical-rl;
-    transform: rotate(180deg);
+    writing-mode: horizontal-tb;
+    transform: none;
     align-self: stretch;
     margin: 0 !important;
     padding: 8pt 14pt !important;
-    color: var(--accent) !important;
-    background: transparent !important;
+    color: var(--method-title-fg) !important;
+    background: var(--method-title-bg) !important;
     border: 0;
-    border-right: 6pt solid var(--accent);
-    border-radius: 0;
+    border-radius: 6pt;
     box-shadow: none;
   }
   </style>
@@ -1415,7 +1443,7 @@
        per-section measurements. -->
   <div class="method-hero" data-measure-role="column">
     <div class="section grow" data-section="method" data-measure-skip="true">
-      <h2>Method <button class="listen-btn" data-section="method">Listen</button></h2>
+      <h2><span class="method-title-label">Method</span><button class="listen-btn" data-section="method">Listen</button></h2>
       <div class="method-body">
         <figure><img src="{{METHOD_FIGURE}}" alt="wide"><figcaption>{{METHOD_CAPTION}}</figcaption></figure>
         <!-- PSEUDO-SECTION method-text: visually transparent (no border / bg /

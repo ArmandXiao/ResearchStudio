@@ -72,10 +72,12 @@ ROLES = ("accent-soft", "accent", "play-highlight-blue")
 
 
 def _ink(accent_hex: str) -> str:
-    """Readable text color for text placed ON the accent: light ink for a dark
-    accent, dark ink for a light accent (WCAG relative luminance). So an accent
-    pill's label stays legible whatever theme (even a light custom accent) is
-    applied — not a hard-coded white that vanishes on a pale accent."""
+    """Choose the higher-contrast WCAG ink for text placed on ``accent_hex``.
+
+    Comparing the two contrast ratios directly is safer than a luminance
+    threshold: a mid-tone custom theme can sit on the wrong side of an
+    arbitrary cutoff even though the other ink is clearly more readable.
+    """
     h = accent_hex.lstrip("#")
     if len(h) == 3:
         h = "".join(c * 2 for c in h)
@@ -84,8 +86,10 @@ def _ink(accent_hex: str) -> str:
     except Exception:
         return "#ffffff"
     lin = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-    L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-    return "#ffffff" if L < 0.4 else "#141414"
+    accent_l = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    white_contrast = 1.05 / (accent_l + 0.05)
+    black_contrast = (accent_l + 0.05) / 0.05
+    return "#ffffff" if white_contrast >= black_contrast else "#000000"
 
 
 def _rand_pick_list(opts: list[str], seed: str) -> str:

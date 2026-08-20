@@ -228,7 +228,7 @@ double-render text when the user turns on CC.
 
 `timeline.json` must already contain the explicit section mapping. If the deck
 uses slide ids instead of canonical poster ids, build the timeline with
-`paper2video/scripts/build_timeline.py --section-map ...` first.
+`python -m pptx2video.build_timeline --section-map ...` first.
 
 ## Required Hard Gate
 

@@ -89,21 +89,6 @@ npx github:microsoft/ResearchStudio
 For usage, see [Idea](ResearchStudio-Idea/#usage) and [Reel](ResearchStudio-Reel/#usage).
 We recommend using these skills with model versions $\ge$ `claude-opus-4.6` or `gpt-5.5`.
 
-The PowerPoint renderer is independently maintained at
-[`ai-nuts/pptx2video`](https://github.com/ai-nuts/pptx2video). Install its
-skill and Python 3.11+ CLI runtime separately from ResearchStudio:
-
-```bash
-npx skills add ai-nuts/pptx2video --skill pptx2video
-python -m pip install \
-  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
-python -m playwright install chromium
-pptx2video doctor --svg
-```
-
-Then invoke `/pptx2video` in a supporting agent host, or call the public
-`pptx2video render` CLI directly.
-
 ## License
 
 [MIT](LICENSE)

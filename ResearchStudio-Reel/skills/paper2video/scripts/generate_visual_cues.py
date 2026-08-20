@@ -16,13 +16,14 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+
+from pptx2video.ffmpeg import find_ffmpeg_pair
 
 try:
     from extract_pptx_elements import extract_pptx_elements
@@ -589,6 +590,118 @@ def geometry_text_overlap(chunk: str, semantic_region: Region, geometry_region: 
     geometry_tokens = set(content_tokens(f"{geometry_region.region_id} {geometry_region.text}"))
     chunk_tokens = set(content_tokens(chunk))
     return len((semantic_tokens | chunk_tokens) & geometry_tokens)
+
+
+# A title or tagline can be exported as several one-line text boxes in one
+# group. Expand its cue to the complete wrapped run before the renderer tightens
+# the box to painted ink. Multi-line paragraph boxes remain separate.
+GROUP_WRAPPED_LINES = os.environ.get(
+    "VIDEO_CUE_GROUP_WRAPPED_LINES", "1"
+).strip().lower() not in ("0", "off", "false", "no")
+WRAP_X_EPS = float(os.environ.get("VIDEO_CUE_WRAP_X_EPS", "0.02"))
+WRAP_MIN_ASPECT = float(os.environ.get("VIDEO_CUE_WRAP_MIN_ASPECT", "2.5"))
+WRAP_GAP_MAX_FRAC = float(os.environ.get("VIDEO_CUE_WRAP_GAP_FRAC", "0.15"))
+WRAP_H_LO, WRAP_H_HI = 0.6, 1.6
+
+
+def _region_is_single_line(region: Region) -> bool:
+    _, _, width, height = region.box
+    return height > 0 and (width / height) >= WRAP_MIN_ASPECT
+
+
+def _wrapped_adjacent(upper: Region, lower: Region) -> bool:
+    """Return whether ``lower`` is a wrapped continuation of ``upper``."""
+    upper_x, upper_y, _, upper_height = upper.box
+    lower_x, lower_y, _, lower_height = lower.box
+    if abs(upper_x - lower_x) > WRAP_X_EPS:
+        return False
+    if (
+        upper_height <= 0
+        or lower_height <= 0
+        or not (WRAP_H_LO <= lower_height / upper_height <= WRAP_H_HI)
+    ):
+        return False
+    if not (_region_is_single_line(upper) and _region_is_single_line(lower)):
+        return False
+    gap = lower_y - (upper_y + upper_height)
+    minimum_height = min(upper_height, lower_height)
+    return -0.5 * minimum_height <= gap <= WRAP_GAP_MAX_FRAC * minimum_height
+
+
+def _wrapped_run(target: Region, siblings: list[Region]) -> list[Region]:
+    ordered = sorted(siblings, key=lambda region: region.box[1])
+    try:
+        index = ordered.index(target)
+    except ValueError:
+        return [target]
+    run = [target]
+    cursor = index
+    while cursor + 1 < len(ordered) and _wrapped_adjacent(
+        ordered[cursor], ordered[cursor + 1]
+    ):
+        run.append(ordered[cursor + 1])
+        cursor += 1
+    cursor = index
+    while cursor - 1 >= 0 and _wrapped_adjacent(
+        ordered[cursor - 1], ordered[cursor]
+    ):
+        run.insert(0, ordered[cursor - 1])
+        cursor -= 1
+    return run
+
+
+def union_wrapped_line_cues(
+    cue_entries: list[dict],
+    regions: list[Region],
+    *,
+    evidence_entries: list[tuple[dict, dict, dict, dict]] | None = None,
+) -> None:
+    """Expand PPTX text cues and their evidence to complete wrapped runs."""
+    if not GROUP_WRAPPED_LINES:
+        return
+    by_id = {region.region_id: region for region in regions if region.source == "pptx"}
+    evidence_by_cue = {
+        id(cue): (plan, audit, geometry)
+        for cue, plan, audit, geometry in (evidence_entries or [])
+    }
+    for cue in cue_entries:
+        if cue.get("geometry_source") != "pptx":
+            continue
+        target = by_id.get(cue.get("geometry_target"))
+        if (
+            target is None
+            or target.shape_type != "TEXT_BOX"
+            or not target.parent_id
+            or not _region_is_single_line(target)
+        ):
+            continue
+        siblings = [
+            region
+            for region in by_id.values()
+            if region.parent_id == target.parent_id and region.shape_type == "TEXT_BOX"
+        ]
+        if len(siblings) < 2:
+            continue
+        run = _wrapped_run(target, siblings)
+        if len(run) < 2:
+            continue
+        box = union_region_boxes(run)
+        if not box:
+            continue
+        rounded_box = round_list(box)
+        rounded_point = round_list(point_from_box(box))
+        grouped_ids = [region.region_id for region in run]
+        cue["box"] = rounded_box
+        cue["point"] = rounded_point
+        cue["geometry_box"] = rounded_box
+        cue["grouped_wrapped_lines"] = grouped_ids
+        for entry in evidence_by_cue.get(id(cue), ()):
+            entry["geometry_box"] = rounded_box
+            entry["grouped_wrapped_lines"] = grouped_ids
+            if "point" in entry:
+                entry["point"] = rounded_point
+            if "region_box" in entry:
+                entry["region_box"] = rounded_box
 
 
 def geometry_match_score(chunk: str, semantic_region: Region, geometry_region: Region) -> tuple[float, list[str], float, float, float]:
@@ -1706,42 +1819,11 @@ def load_anchor_contract(path: Path | None) -> dict[int, dict[int, dict]]:
     return out
 
 
-def find_tool(name: str) -> str | None:
-    return shutil.which(name)
-
-
-def imageio_ffmpeg_binary() -> str | None:
-    try:
-        import imageio_ffmpeg  # type: ignore
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
-
-
-def find_ffmpeg_pair() -> tuple[str | None, str | None]:
-    env_ffmpeg = os.getenv("PAPER2VIDEO_FFMPEG") or os.getenv("FFMPEG_BINARY")
-    if env_ffmpeg and Path(env_ffmpeg).expanduser().is_file():
-        env_ffprobe = os.getenv("PAPER2VIDEO_FFPROBE")
-        if env_ffprobe and Path(env_ffprobe).expanduser().is_file():
-            return str(Path(env_ffmpeg).expanduser()), str(Path(env_ffprobe).expanduser())
-        return str(Path(env_ffmpeg).expanduser()), str(Path(env_ffmpeg).expanduser())
-
-    fallback = imageio_ffmpeg_binary()
-    if fallback:
-        return fallback, fallback
-
-    ffmpeg = find_tool("ffmpeg")
-    ffprobe = find_tool("ffprobe")
-    if ffmpeg and ffprobe:
-        return ffmpeg, ffprobe
-    if ffmpeg:
-        return ffmpeg, ffmpeg
-    return None, None
-
-
 def probe_duration(audio: Path) -> float:
-    ffmpeg, ffprobe = find_ffmpeg_pair()
+    ffmpeg, ffprobe = find_ffmpeg_pair(
+        required=False,
+        component="generate_visual_cues",
+    )
     if ffprobe and ffmpeg and ffprobe != ffmpeg:
         out = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
@@ -1912,6 +1994,7 @@ def generate(project: Path, *, svg_dir: Path, sections: list[Section],
         audit_entries = []
         plan_entries = []
         geometry_entries = []
+        cue_evidence_entries = []
         slide_contract = (anchor_contract or {}).get(sec.index, {})
         if anchor_contract and not slide_contract:
             msg = f"slide {sec.index} has no anchor contract entries"
@@ -2093,7 +2176,19 @@ def generate(project: Path, *, svg_dir: Path, sections: list[Section],
                 "end": end,
                 "seconds": round(end - start, 3),
             })
+            if cue is not None:
+                cue_evidence_entries.append(
+                    (cue, plan_entry, audit_entries[-1], geometry_entries[-1])
+                )
 
+        # Treat same-group single-line title fragments as one visual unit. The
+        # standalone renderer then tightens transparent text to the painted ink
+        # while preserving filled cards.
+        union_wrapped_line_cues(
+            cue_entries,
+            regions,
+            evidence_entries=cue_evidence_entries,
+        )
         cues_payload["slides"].append({
             "index": sec.index,
             "id": sec.sid,

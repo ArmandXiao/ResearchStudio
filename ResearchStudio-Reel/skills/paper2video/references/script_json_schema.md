@@ -28,7 +28,8 @@ also produced from paper2assets by
 - **sections[*].id** — also the output filename (`audio/<id>.mp3`). For
   ppt-master projects, this is usually the slide stem (`01-intro`). For
   paper2assets, this is the semantic section id (`problem`, `key-result`).
-  In both cases, pass the JSON to `render_video.py --script-json` so frame and
+  In both cases, pass the JSON to
+  `python -m pptx2video.render_video --script-json` so frame and
   audio pairing follows `sections` order instead of alphabetical filename
   order.
 - **sections[*].heading** — only used in `manifest.json`. Cosmetic.
@@ -80,7 +81,8 @@ It also writes a sidecar `duration_plan.json`:
 ```
 
 This sidecar is metadata only. `generate_audio.py` should consume `script.json`,
-not `duration_plan.json`. After TTS, `render_video.py --target-minutes` writes a
+not `duration_plan.json`. After TTS,
+`python -m pptx2video.render_video --target-minutes` writes a
 real `duration_report.json` based on probed MP3/MP4 duration.
   `notes_to_script.py --min-chars` filters them out automatically. Just
   remember the resulting MP4 will also skip those slides — if a divider
@@ -127,6 +129,7 @@ audio/
 └── script.json
 ```
 
-`render_video.py` then reads the PPTX (4 slides) and audio dir (4 MP3s) and
+`python -m pptx2video.render_video` then reads the PPTX (4 slides) and audio dir
+(4 MP3s) and
 muxes them in sorted order. PNGs are named `slide-01.png … slide-04.png`
 inside the temp dir; matching is positional, not by stem.

@@ -5,10 +5,10 @@ description: >
   narrated MP4 video. Prefer the shared paper2assets package when present so
   paper2poster, paper2blog, paper2slides, and paper2video use the same section
   order and narration. Preserve the advanced deck route by delegating slide
-  authoring to the external `hugohe3/ppt-master` project, then synthesize audio
-  with `skills/paper2poster/scripts/generate_audio.py`, render with
-  `skills/paper2video/scripts/render_video.py`, and burn final subtitles with
-  `skills/paper2video/scripts/add_subtitles.py`.
+  authoring to the installed `ppt-master` skill, then synthesize audio
+  with `skills/paper2poster/scripts/generate_audio.py`, then delegate generic
+  rendering, subtitles, timeline assembly, and strict media QA to the installed
+  `pptx2video` package.
 ---
 
 # paper2video - paper/assets/deck -> narrated MP4
@@ -23,9 +23,9 @@ paper.pdf
   -> assets/meta/sections.json + assets/meta/narration.json
   -> deck source (ppt-master / paper2slides / existing PPTX)
   -> assets/audio/*.mp3 from skills/paper2poster/scripts/generate_audio.py
-  -> raw MP4 from skills/paper2video/scripts/render_video.py
-  -> timeline.json from skills/paper2video/scripts/build_timeline.py
-  -> video.mp4 with burned-in subtitles from add_subtitles.py
+  -> raw MP4 from python -m pptx2video.render_video
+  -> timeline.json from python -m pptx2video.build_timeline
+  -> video.mp4 from python -m pptx2video.add_subtitles
 ```
 
 The important branch-level contract is this: when a `paper2assets` package is
@@ -35,7 +35,7 @@ paper2blog, paper2slides, and paper2video aligned.
 
 ## Paths
 
-Run commands from the AutoResearch repo root unless noted.
+Run Paper2Video workflow commands from `ResearchStudio-Reel/` unless noted.
 
 ```bash
 PAPER2POSTER=skills/paper2poster
@@ -43,17 +43,34 @@ PAPER2VIDEO=skills/paper2video
 PAPER2ASSETS=skills/paper2assets
 ```
 
-`ppt-master` is an external dependency, not a path that every agent has:
+Install both external skills before starting Paper2Video. Do not clone or
+vendor either dependency inside ResearchStudio:
 
 ```bash
-git clone https://github.com/hugohe3/ppt-master /path/to/ppt-master
-PPT_MASTER_DIR=/path/to/ppt-master
+npx skills add hugohe3/ppt-master --skill ppt-master
+npx skills add ai-nuts/pptx2video --skill pptx2video
 ```
 
-Do not hard-code `~/.claude/skills/...`. Users may run this repo from Codex,
-Claude Code, a shell, or another agent.
+Install and verify the compatible public `pptx2video` 0.5.x CLI runtime before
+either route. Use a Python 3.11 or newer environment:
 
-## Output Contract
+```bash
+python -m pip install \
+  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
+python -m playwright install chromium
+pptx2video --version
+pptx2video doctor --svg
+```
+
+Do not hard-code a host-specific skill directory. Users may run this repository
+from Codex, Claude Code, a shell, or another agent. Existing or edited decks can
+also invoke the installed skill directly with `/pptx2video`.
+
+Paper2Video owns paper-specific orchestration and visual-cue preparation. The
+installed package owns the generic audio timing, video composition, subtitle,
+timeline, and media-QA modules used below.
+
+## Route A Output Contract
 
 Follow the shared paper2assets v2 layout. The paper2video bundle top level holds
 only deliverable files plus `manifest.json`; all audio, captions, slide decks,
@@ -61,7 +78,7 @@ clips, rendered frames, reports, and timeline/cue metadata live under `assets/`:
 
 ```text
 <video_outdir>/
-  video.mp4                  # required, burned-in subtitles with translucent caption box
+  video.mp4                  # required, burned-in subtitles in an appended black bottom band
   video_no_subtitles.mp4     # required, raw/pre-subtitle playback copy for paper2reel
   video.pptx                 # required, for follow-up editing
   manifest.json
@@ -73,7 +90,8 @@ clips, rendered frames, reports, and timeline/cue metadata live under `assets/`:
     meta/                          # duration reports, timeline, visual cues, QA reports
 ```
 
-Initialize it before running the route:
+Initialize it before running Route A. Route B must skip this scaffolding and
+pass a destination that does not yet exist to the standalone CLI:
 
 **Pick `<video_outdir>` (resolve BEFORE any file writes).** The bundle directory is shared across every paper2* skill — when paper2assets, paper2poster, paper2blog, and paper2video target the same root, the video's slides/audio/clips sit next to the poster's HTML, the blog's `.docx`, and the shared narration script in one self-contained package. Resolve deterministically:
 
@@ -104,7 +122,8 @@ VIDEO_META=$VIDEO_ASSETS/meta
 mkdir -p "$VIDEO_AUDIO" "$VIDEO_CAPTIONS" "$VIDEO_SLIDES" "$VIDEO_CLIPS" "$VIDEO_META/reports"
 ```
 
-The MP4 produced directly by `render_video.py` is the raw no-subtitle render.
+The MP4 produced directly by `python -m pptx2video.render_video` is the raw
+no-subtitle render.
 Keep an audit copy under `$VIDEO_CLIPS/video_raw.mp4`, and also copy it to
 `$VIDEO_OUT/video_no_subtitles.mp4` as a required deliverable. The default
 playback deliverable with burned-in subtitles is `$VIDEO_OUT/video.mp4`.
@@ -190,7 +209,7 @@ python skills/paper2video/scripts/plan_tts_rate.py \
   --target-minutes 3 \
   --out "$VIDEO_AUDIO/tts_rate_plan.json"
 
-python skills/paper2video/scripts/generate_edge_audio.py \
+python -m pptx2video.generate_edge_audio \
   "$VIDEO_AUDIO/script.json" \
   --outdir "$VIDEO_AUDIO" \
   --rate-plan "$VIDEO_AUDIO/tts_rate_plan.json" \
@@ -220,8 +239,8 @@ default high-quality route is `ppt-master`.
   skill workflow.
 - Do not replace ppt-master with handwritten SVG, a local simplified generator,
   or a copied example deck whose content does not come from the paper.
-- Before running ppt-master, read the external
-  `$PPT_MASTER_DIR/skills/ppt-master/SKILL.md` and follow its gates: source
+- Before running ppt-master, invoke the installed `ppt-master` skill and follow
+  its gates: source
   conversion, project init/import, Strategist Eight Confirmations, optional
   image acquisition, sequential page-by-page SVG authoring by the main agent,
   `svg_quality_checker.py`, `total_md_split.py`, `finalize_svg.py`, and
@@ -359,7 +378,7 @@ python skills/paper2video/scripts/generate_visual_cues.py <ppt_master_project> \
 6. Render the video, pinning audio order to the script JSON:
 
 ```bash
-python skills/paper2video/scripts/render_video.py "$VIDEO_OUT" \
+python -m pptx2video.render_video "$VIDEO_OUT" \
   --pptx <deck.pptx> \
   --audio-dir "$VIDEO_AUDIO" \
   --script-json "$VIDEO_AUDIO/script.json" \
@@ -375,22 +394,24 @@ python skills/paper2video/scripts/render_video.py "$VIDEO_OUT" \
 7. Burn final subtitles and place final video/deck in the normalized output.
 
 ```bash
-python skills/paper2video/scripts/add_subtitles.py "$VIDEO_OUT" \
+python -m pptx2video.add_subtitles "$VIDEO_OUT" \
   --mp4 "$VIDEO_CLIPS/video_raw.mp4" \
   --audio-dir "$VIDEO_AUDIO" \
   --script-json "$VIDEO_AUDIO/script.json" \
   --srt-out "$VIDEO_CAPTIONS/video.srt" \
   --vtt-out "$VIDEO_CAPTIONS/video.vtt" \
   --out "$VIDEO_OUT/video.mp4"
+```
 
-The default burned-in subtitle render uses a translucent dark caption box so
-narration text stays separate from dense PPT content. Use `--no-subtitle-box`
-only for an explicitly approved legacy/plain-caption render. Use
-`--subtitle-bar` to scale the complete slide above a solid black caption band
-when captions must not overlap any PPT content.
+The default burned-in subtitle render scales the complete slide above an
+appended solid black caption band and burns white captions inside that reserved
+band. Use `--subtitle-overlay` only when captions may cover slide pixels; in
+overlay mode, `--subtitle-box` keeps the translucent dark caption background
+and `--no-subtitle-box` requests plain text.
 Use `--no-subtitles` when the user disables captions. It still writes SRT/VTT
 for timeline and QA, but stream-copies only video/audio into `video.mp4`.
 
+```bash
 cp "$VIDEO_CLIPS/video_raw.mp4" "$VIDEO_OUT/video_no_subtitles.mp4"
 cp <deck.pptx> "$VIDEO_SLIDES/slides.pptx"
 cp <deck.pptx> "$VIDEO_OUT/video.pptx"
@@ -409,7 +430,7 @@ paper2reel must consume this file instead of guessing section start/end
 times from the final MP4.
 
 ```bash
-python skills/paper2video/scripts/build_timeline.py \
+python -m pptx2video.build_timeline \
   --script-json "$VIDEO_AUDIO/script.json" \
   --duration-report "$VIDEO_META/video_duration_report.json" \
   --visual-cue-plan "$VIDEO_META/visual_cue_plan.json" \
@@ -436,92 +457,44 @@ Prefer the grouped form when poster sections overlap:
 }
 ```
 
-### Route B - existing ppt-master deck video
+### Route B - existing or edited PPTX via standalone pptx2video
 
-Use this when ppt-master has already produced a complete project with
-`notes/`, `svg_output/`, and `exports/*.pptx`.
-
-```text
-<project_path>/
-  notes/<slide>.md
-  svg_output/<slide>.svg
-  exports/<name>.pptx
-```
-
-If `notes/*.md` is missing but `notes/total.md` exists, run the external
-ppt-master splitter:
+Use the independently maintained `pptx2video` package for a complete native
+PPTX. Do not copy its runtime into this skill and do not call
+`skills/paper2video/scripts/` for this route. Install it, verify its native
+dependencies, and render through the public CLI:
 
 ```bash
-python "$PPT_MASTER_DIR/scripts/total_md_split.py" <project_path>
+PPTX2VIDEO_OUT=/absolute/path/to/new-video-bundle
+python -m pip install \
+  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
+python -m playwright install chromium
+pptx2video --version
+pptx2video doctor --svg
+test ! -e "$PPTX2VIDEO_OUT"
+pptx2video render <deck.pptx> "$PPTX2VIDEO_OUT" --resolution 1080p
 ```
 
-Build TTS script JSON from ppt-master notes:
+Always choose a fresh `$PPTX2VIDEO_OUT`; do not reuse the Route A `$VIDEO_OUT`
+or an existing paper2assets root. The CLI writes the complete editable video
+bundle, word-aligned captions, protocol reports, timeline, and strict QA
+evidence. It returns success only after QA passes with zero errors and zero
+warnings. Read [references/pptx2video.md](references/pptx2video.md) for the
+minimal bridge contract. The standalone package owns all detailed PPTX
+authoring, Animation Pane, geometry conflict, and Identity Map rules.
 
-```bash
-python skills/paper2video/scripts/notes_to_script.py <project_path> \
-  --voice alloy \
-  --target-minutes 3 \
-  --out <project_path>/audio/script.json
-```
+## Route A Final QA Gate
 
-Generate audio:
-
-```bash
-python skills/paper2poster/scripts/generate_audio.py \
-  <project_path>/audio/script.json \
-  --outdir <project_path>/audio
-```
-
-Render:
-
-```bash
-python skills/paper2video/scripts/render_video.py <project_path> \
-  --pptx <project_path>/exports/<name>.pptx \
-  --audio-dir <project_path>/audio \
-  --script-json <project_path>/audio/script.json \
-  --attention-mode highlight \
-  --highlight-style spotlight_laser \
-  --visual-cues <project_path>/visual_cues.json \
-  --target-minutes 3 \
-  --duration-report-out "$VIDEO_META/video_duration_report.json" \
-  --out "$VIDEO_CLIPS/video_raw.mp4" \
-  --frames-out "$VIDEO_SLIDES/frames"
-```
-
-Burn final subtitles and copy the deck into the v2 assets bundle:
-
-```bash
-python skills/paper2video/scripts/add_subtitles.py <project_path> \
-  --mp4 "$VIDEO_CLIPS/video_raw.mp4" \
-  --audio-dir <project_path>/audio \
-  --script-json <project_path>/audio/script.json \
-  --srt-out "$VIDEO_CAPTIONS/video.srt" \
-  --vtt-out "$VIDEO_CAPTIONS/video.vtt" \
-  --out "$VIDEO_OUT/video.mp4"
-
-The default burned-in subtitle render uses a translucent dark caption box so
-narration text stays separate from dense PPT content. Use `--no-subtitle-box`
-only for an explicitly approved legacy/plain-caption render. Use
-`--subtitle-bar` to scale the complete slide above a solid black caption band
-when captions must not overlap any PPT content.
-Use `--no-subtitles` when the user disables captions. It still writes SRT/VTT
-for timeline and QA, but stream-copies only video/audio into `video.mp4`.
-
-cp "$VIDEO_CLIPS/video_raw.mp4" "$VIDEO_OUT/video_no_subtitles.mp4"
-cp <project_path>/exports/<name>.pptx "$VIDEO_SLIDES/slides.pptx"
-```
-
-## Final QA Gate
-
-Run the final hard QA gate for either route. This is not a smoke test; it checks
-the exact slide frames archived by `render_video.py --frames-out`, probes
+Run the final hard QA gate for Route A. This is not a smoke test; it checks
+the exact slide frames archived by
+`python -m pptx2video.render_video --frames-out`, probes
 audio/video streams, checks PPTX geometry for text overflow/overlap and
 undersized visuals, checks rendered-frame blank space/sparsity, verifies the
 final MP4 duration, and rejects unsafe TTS rate plans when duration control is
 requested.
 
 ```bash
-python skills/paper2video/scripts/check_video_package.py "$VIDEO_OUT" \
+python -m pptx2video.check_video_package "$VIDEO_OUT" \
   --pptx <deck.pptx> \
   --script-json "$VIDEO_AUDIO/script.json" \
   --audio-dir "$VIDEO_AUDIO" \
@@ -548,7 +521,7 @@ For stricter semantic-anchor enforcement, also require the anchor contract and
 PPTX-backed anchors:
 
 ```bash
-python skills/paper2video/scripts/check_video_package.py "$VIDEO_OUT" \
+python -m pptx2video.check_video_package "$VIDEO_OUT" \
   --pptx <deck.pptx> \
   --script-json "$VIDEO_AUDIO/script.json" \
   --audio-dir "$VIDEO_AUDIO" \
@@ -630,67 +603,15 @@ When strict visual-attention alignment is required and Edge TTS is acceptable,
 use the bundled Edge helper because it can write word-boundary timings:
 
 ```bash
-python skills/paper2video/scripts/generate_edge_audio.py \
+python -m pptx2video.generate_edge_audio \
   <project_path>/audio/script.json \
   --outdir <project_path>/audio \
   --timings-out <project_path>/audio/word_timings.json
 ```
 
 Those timings let `generate_visual_cues.py --require-timestamps` and
-`check_video_package.py --require-word-timings` reject highlight plans that only
+`python -m pptx2video.check_video_package --require-word-timings` reject highlight plans that only
 use proportional/estimated timing.
-
-## Rendering Details
-
-`render_video.py` does:
-
-1. Prefer `svg_final/*.svg` -> PNG frames via Playwright/Chrome. If no SVG deck
-   exists, or `--frame-source pptx` is explicitly set, use the legacy PPTX ->
-   PDF -> PNG path via LibreOffice and `pdftoppm`.
-2. Copy the exact MP4 frames to `--frames-out` when provided; final QA should
-   point `--frames-dir` at that same directory.
-3. MP3 duration probing via `ffprobe` or the ffmpeg fallback.
-4. One MP4 segment per slide.
-5. ffmpeg concat into a final H.264/AAC MP4.
-
-Audio ordering:
-
-- Preferred: `--script-json <script.json>`.
-- Auto-detected fallback: `<audio-dir>/script.json`, then `<project>/assets/meta/narration.json`, then `<project>/narration.json` for legacy bundles.
-- Secondary fallback: `<audio-dir>/manifest.json`.
-- Last resort: sorted `*.mp3` filenames.
-
-This matters for `paper2assets`, whose ids are semantic (`problem`, `method`,
-`key-result`) rather than numeric (`01-intro`, `02-method`).
-
-ffmpeg selection:
-
-- First honor `PAPER2VIDEO_FFMPEG` / `PAPER2VIDEO_FFPROBE` if set.
-- Then prefer `imageio_ffmpeg`'s bundled static ffmpeg when installed.
-- Then fall back to system `ffmpeg` / `ffprobe`.
-
-This mirrors the ACL26 video prototype: its subtitle burn step used
-`imageio_ffmpeg`'s ffmpeg 7.x because the system ffmpeg on this machine is
-2.4.x and too old for reliable subtitles/audio filtering.
-
-Useful flags:
-
-| Flag | Purpose |
-|---|---|
-| `--resolution 720p|1080p|1440p|4k` | Output frame size (default 1080p) |
-| `--frame-source auto|svg|pptx` | Slide raster source; `auto` prefers `svg_final` |
-| `--svg-dir DIR` | Explicit SVG deck directory |
-| `--frames-out DIR` | Persist the exact frames used by the MP4 for QA/review |
-| `--fps N` | Frame rate (default 30) |
-| `--pad-tail SECONDS` | Trailing silence after each slide (default 0.3) |
-| `--start-pad SECONDS` | Leading silence before slide 1 (default 0.5) |
-| `--target-minutes N` | Write a final duration report against an N-minute target |
-| `--attention-mode none|highlight|cursor|both` | Burn positioned attention cues into slide segments (default `highlight`) |
-| `--highlight-style box|spotlight|cursor|box_cursor|spotlight_cursor|laser|box_laser|spotlight_laser` | Presentation style for highlight cues; default `spotlight_laser` |
-| `--visual-cues path.json` | Normalized per-slide highlight/cursor cue file |
-| `--allow-missing-visual-cues` | Degraded/debug only; final output should not use it |
-| `--frames-only` | Stop after slide-frame export |
-| `--audio-only-check` | Verify frame/audio count and order |
 
 ## Duration Control
 
@@ -724,7 +645,7 @@ shorter section list; existing PPTX decks should keep the default `keep` mode.
 `--allow-extractive-duration-draft` is for experiments only and must not be used
 for final deliverables.
 
-Then pass the same target to `render_video.py`. Rendering writes
+Then pass the same target to `python -m pptx2video.render_video`. Rendering writes
 `<out_stem>_duration_report.json` with the real MP4 duration after audio exists.
 Use that measured duration to produce a conservative TTS rate plan:
 
@@ -818,7 +739,7 @@ python skills/paper2video/scripts/generate_visual_cues.py <project_path> \
 Then pass positioned cues at render time:
 
 ```bash
-python skills/paper2video/scripts/render_video.py <project_path> \
+python -m pptx2video.render_video <project_path> \
   --pptx <project_path>/exports/<name>.pptx \
   --audio-dir <project_path>/audio \
   --script-json <project_path>/audio/script.json \
@@ -830,7 +751,7 @@ python skills/paper2video/scripts/render_video.py <project_path> \
 ```
 
 `highlight` is the default final-delivery mode. If `--attention-mode` is not
-`none`, `render_video.py` now requires `--visual-cues`; missing cues are a
+`none`, `python -m pptx2video.render_video` requires `--visual-cues`; missing cues are a
 blocking error unless the agent explicitly passes the degraded/debug-only
 `--allow-missing-visual-cues`.
 
@@ -872,7 +793,7 @@ each contracted narration chunk must match its exact `anchor_id`, and
 rendered from `pptx`, `pptx_cluster`, or a semantic fallback. The candidate
 review page shows the narration chunk, word-timing match, selected semantic
 target, final geometry target, and top rejected semantic/geometry alternatives.
-`check_video_package.py --strict` reports geometry source counts and timing
+`python -m pptx2video.check_video_package --strict` reports geometry source counts and timing
 source counts; it fails if `geometry_box` is malformed, does not match the
 rendered cue `box`, lies outside the normalized slide canvas, or if required
 word-timing alignment is low-confidence.
@@ -923,7 +844,7 @@ Strict gate repair loop:
 mode fails, then exits non-zero. That is intentional: diagnostics exist for
 repair, while downstream rendering is still blocked until the gate passes.
 
-After a highlighted render, run `build_timeline.py` with the same
+After a highlighted render, run `python -m pptx2video.build_timeline` with the same
 `visual_cue_plan.json`, `visual_cues.json`, `duration_report.json`, script, and
 subtitle VTT. This is what binds every spoken chunk to its audio time, subtitle
 cue, and visual target. Do not let downstream tools cut video by ad-hoc
@@ -939,18 +860,18 @@ the viewer can show duplicate subtitles when CC is enabled.
 
 ## Subtitles
 
-`add_subtitles.py` can use either notes files or script JSON:
+`python -m pptx2video.add_subtitles` can use either notes files or script JSON:
 
 - With `--script-json`, subtitle order and fallback text come from the JSON.
 - Without it, the script preserves legacy ppt-master behavior: sorted
   `notes/*.md` paired with sorted `audio/*.mp3`.
 
-Default mode burns subtitles into the video pixels with a translucent dark
-caption box. Pass `--soft` to mux a toggleable `mov_text` track instead. Pass
-`--srt-only` to produce just the SRT. Pass `--no-subtitle-box` only for a
-user-approved legacy/plain-caption render. Pass `--subtitle-bar` to preserve
-the complete slide above a solid black bottom band and burn white captions
-inside that reserved band; this avoids covering dense PPT content.
+Default mode preserves the complete slide above an appended solid black bottom
+band and burns white captions inside that reserved band. Pass
+`--subtitle-overlay` to keep the original frame size and place captions over
+slide pixels; overlay mode uses a translucent dark box by default, and
+`--no-subtitle-box` removes that background. Pass `--soft` to mux a toggleable
+`mov_text` track instead. Pass `--srt-only` to produce just the SRT.
 Pass `--no-subtitles` to keep the public MP4 caption-free while still writing
 the SRT/VTT timing sidecars required by the internal timeline and QA.
 
@@ -960,19 +881,22 @@ Before calling the video done:
 
 - PPTX slide count equals the number of selected script sections.
 - Every selected section has `audio/<id>.mp3`.
-- `render_video.py --audio-only-check` passes.
+- `python -m pptx2video.render_video --audio-only-check` passes.
 - `ffprobe` reports a positive duration for the final MP4.
-- `check_video_package.py --strict` passes and writes `video_qa_report.json`.
-- If visual attention is enabled, `check_video_package.py --strict-attention`
+- `python -m pptx2video.check_video_package --strict` passes and writes
+  `video_qa_report.json`.
+- If visual attention is enabled,
+  `python -m pptx2video.check_video_package --strict-attention`
   passes with `--require-visual-cues --require-cue-plan --require-timeline
   --require-word-timings`.
 - `timeline.json` exists and every chunk has the expected audio window,
   subtitle cues, and accepted visual cue before paper2reel consumes it.
-- If subtitles are requested, `add_subtitles.py` uses the same `--start-pad`,
-  `--pad-tail`, and `--script-json` as `render_video.py`.
+- If subtitles are requested, `python -m pptx2video.add_subtitles` uses the same
+  `--start-pad`, `--pad-tail`, and `--script-json` as
+  `python -m pptx2video.render_video`.
 
 ## References
 
 - `references/script_json_schema.md` - narration JSON shape and TTS gotchas.
-- `references/render_video.md` - compositor internals and ffmpeg debugging.
-- `references/visual_cues.md` - visual cue JSON schema and examples.
+- `references/visual_cues.md` - paper-specific cue planning and anchor bridge.
+- `references/pptx2video.md` - minimal bridge to the standalone PPTX renderer.

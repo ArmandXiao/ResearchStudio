@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from pptx2video.ffmpeg import find_ffmpeg_pair
 
 SCHEMA_VERSION = "paper2video_tts_rate_plan.v1"
 
@@ -39,37 +39,6 @@ def read_json(path: Path) -> Any:
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def which(name: str) -> str | None:
-    return shutil.which(name)
-
-
-def imageio_ffmpeg_binary() -> str | None:
-    try:
-        import imageio_ffmpeg  # type: ignore
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
-
-
-def find_ffmpeg_pair() -> tuple[str | None, str | None]:
-    env_ffmpeg = os.getenv("PAPER2VIDEO_FFMPEG") or os.getenv("FFMPEG_BINARY")
-    if env_ffmpeg and Path(env_ffmpeg).expanduser().is_file():
-        env_ffprobe = os.getenv("PAPER2VIDEO_FFPROBE")
-        if env_ffprobe and Path(env_ffprobe).expanduser().is_file():
-            return str(Path(env_ffmpeg).expanduser()), str(Path(env_ffprobe).expanduser())
-        return str(Path(env_ffmpeg).expanduser()), str(Path(env_ffmpeg).expanduser())
-
-    fallback = imageio_ffmpeg_binary()
-    if fallback:
-        return fallback, fallback
-
-    ffmpeg = which("ffmpeg")
-    ffprobe = which("ffprobe")
-    if ffmpeg and ffprobe:
-        return ffmpeg, ffprobe
-    return ffmpeg, ffprobe
 
 
 def probe_duration(path: Path, ffmpeg: str | None, ffprobe: str | None) -> float:
@@ -107,7 +76,7 @@ def load_script_ids(path: Path) -> list[str]:
 
 
 def speech_seconds_from_audio(script_json: Path, audio_dir: Path) -> tuple[float, list[dict[str, Any]]]:
-    ffmpeg, ffprobe = find_ffmpeg_pair()
+    ffmpeg, ffprobe = find_ffmpeg_pair(required=False, component="plan_tts_rate")
     details = []
     total = 0.0
     for sid in load_script_ids(script_json):

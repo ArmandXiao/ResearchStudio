@@ -10,10 +10,9 @@ Sourcing strategy (best-effort, never fabricates):
 
   1. Open the institute's English Wikipedia page (`en.wikipedia.org/wiki/<Name>`,
      with spaces → underscores) and read its Wikidata entity id.
-  2. Prefer the entity's `logo image` (P154) on Wikidata — the OFFICIAL current
-     logo, usually the modern wordmark (e.g. MIT's red 3-letter mark, not the
-     legacy round seal) and, being on Commons, freely licensed to reuse.
-  3. Fall back to scraping the infobox `<img>`: pick the filename matching
+  2. Prefer the entity's `logo image` (P154) on Wikidata, except when it is an
+     explicitly localized text mark and the English infobox has a logo.
+  3. Scrape the infobox `<img>` as that fallback: pick the filename matching
      `logo`/`wordmark`/`seal`/`crest`, scored so the wordmark/logo beats the
      seal and Commons beats non-free en.wikipedia uploads. Skip flags/photos/maps.
   4. Resolve to a full-resolution image URL, download to
@@ -305,6 +304,16 @@ def _institution_tier(segment: str) -> int:
     return 3
 
 
+def _looks_like_institution_fallback(segment: str) -> bool:
+    """Keep named institutions and acronym-like brands, not bare locations."""
+    letters = re.sub(r"[^A-Za-z]", "", segment)
+    return (
+        _institution_tier(segment) < 3
+        or segment.strip().lower() in ALIASES
+        or (len(letters) >= 4 and letters.isupper())
+    )
+
+
 def parent_candidates(name: str) -> list[str]:
     """Generate parent-institution candidates for `name`, most specific first.
 
@@ -320,11 +329,13 @@ def parent_candidates(name: str) -> list[str]:
       2. Same with parenthesized phrases stripped: "Tsinghua University (China)"
          -> "Tsinghua University".
       3. Same with departmental tails stripped: "X University Lab" -> "X University".
-      4. Each comma/dash/slash/semicolon-separated segment, ordered by
+      4. Each institution-like comma/dash/slash/semicolon-separated segment,
+         ordered by
          institution-token TIER (see _institution_tier): HIGH segments
          (containing 'microsoft', 'university', 'polytechnic', ...) first,
          then MID ('institute', 'research', 'labs'), then LOW ('school',
-         'college', 'faculty'), then segments with no institution token.
+         'college', 'faculty'). Trailing location-like segments are skipped;
+         acronym-like institution names such as A*STAR remain eligible.
          Within the same tier, segments preserve input order.
          Example: "School of Pharmacy, Microsoft Research Asia, Shanghai"
          yields "Microsoft Research Asia" (HIGH via 'microsoft') BEFORE
@@ -358,19 +369,30 @@ def parent_candidates(name: str) -> list[str]:
     # Strip departmental tails from the whole string.
     for pat in _DEPARTMENTAL_TAIL_PATTERNS:
         stripped = re.sub(pat, "", raw, flags=re.IGNORECASE).strip()
-        if stripped != raw:
+        if stripped != raw and _looks_like_institution_fallback(stripped):
             push(stripped)
 
     # Split into segments and rank by institution-token tier (HIGH=0 first).
     # Stable sort preserves input order within the same tier.
     segments = [s.strip() for s in re.split(r"\s*[,;/]\s*|\s+[-—]\s+", raw) if s.strip()]
-    segments_ranked = sorted(segments, key=_institution_tier)
-    for seg in segments_ranked:
+    segments_ranked = sorted(
+        enumerate(segments), key=lambda item: _institution_tier(item[1])
+    )
+    for original_index, seg in segments_ranked:
+        if (
+            not _looks_like_institution_fallback(seg)
+            and original_index != 0
+        ):
+            continue
         push(seg)
         # Also strip tails on the segment itself.
         for pat in _DEPARTMENTAL_TAIL_PATTERNS:
             stripped = re.sub(pat, "", seg, flags=re.IGNORECASE).strip()
-            if stripped and stripped != seg:
+            if (
+                stripped
+                and stripped != seg
+                and _looks_like_institution_fallback(stripped)
+            ):
                 push(stripped)
         # And strip parentheses on the segment.
         push(re.sub(r"\s*\([^)]*\)", "", seg).strip())
@@ -868,14 +890,27 @@ def fetch_logo_for(
         except Exception as e:
             print(f"[fetch_logos] {name!r} via {title!r}: wiki fetch failed: {e}", file=sys.stderr)
             continue
-        # Wikidata `logo image` (P154) = the official CURRENT logo (usually the
-        # modern wordmark); try it FIRST, then fall back to scraping the infobox.
+        # Wikidata `logo image` (P154) is normally the best source.  When it is
+        # explicitly a localized text mark, prefer the English infobox logo so
+        # a Korean/Chinese wordmark does not replace a recognizable mark.
         wd_urls = wikidata_logo_urls(_qid_from_html(html))
         src = find_logo_url(html)
         if not wd_urls and not src:
             print(f"[fetch_logos] {name!r} via {title!r}: no logo at {page}", file=sys.stderr)
             continue
-        full_candidates = wd_urls + (thumb_to_full(src) if src else [])
+        infobox_urls = thumb_to_full(src) if src else []
+        p154_name = (
+            urllib.parse.unquote(wd_urls[0]).lower().replace("_", " ")
+            if wd_urls else ""
+        )
+        localized_text_mark = (
+            "characters" in p154_name
+            or bool(re.search(r"logotype\s*\((?!en\))[^)]+\)", p154_name))
+        )
+        full_candidates = (
+            infobox_urls + wd_urls if localized_text_mark and infobox_urls
+            else wd_urls + infobox_urls
+        )
         data = None
         chosen_url = None
         chosen_inspection = None

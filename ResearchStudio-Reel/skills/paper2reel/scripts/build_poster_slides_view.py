@@ -663,7 +663,7 @@ function installPosterTools(doc) {
     style.textContent = `
     [data-section].paper-reel-clickable, .titlebar.paper-reel-clickable { cursor:pointer !important; transition:opacity .16s ease, border-color .16s ease, box-shadow .16s ease, filter .16s ease; }
     body.paper-reel-has-hover [data-section].paper-reel-clickable:not(.paper-reel-hover) { opacity:var(--paper-reel-dim-opacity,.48); }
-    [data-section].paper-reel-hover { border-color:rgba(14,106,110,.9) !important; box-shadow:inset 0 0 0 5px rgba(14,106,110,.72), 0 0 18px rgba(14,106,110,.16) !important; filter:brightness(1.015); }
+    [data-section].paper-reel-hover { filter:brightness(1.015); }
     .titlebar.paper-reel-hover { filter:brightness(1.04); }
     [data-section].paper-reel-flash { border-color:rgba(214,74,54,.72) !important; box-shadow:inset 0 0 0 7px rgba(214,74,54,.46), 0 0 20px rgba(214,74,54,.16) !important; }
     .titlebar.paper-reel-flash { filter:brightness(1.08); }

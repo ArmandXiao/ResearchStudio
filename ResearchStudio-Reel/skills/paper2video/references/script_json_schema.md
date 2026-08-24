@@ -1,11 +1,10 @@
 # script.json - schema, authority, and gotchas
 
 `script.json` is the narration authority Step 4 of `SKILL.md` builds from the
-shared `assets/meta/narration.json`, and it is what Step 5 passes as both
-`--script-json` and `--ids-from-script` to `python3 -m pptx2video render`.
-This file describes exactly what pptx2video reads from it
-(`apply_user_script()` in the installed `pptx2video` package), not a
-narration format this skill invents on its own.
+shared `assets/meta/narration.json`. Step 4 passes it to `pptx2video
+bootstrap`; Step 5 passes it to `pptx2video render` only as
+`--ids-from-script`. This preserves the handle-addressed narration embedded by
+bootstrap instead of applying a second page-level override.
 
 ## Minimal shape (section-level narration)
 
@@ -32,12 +31,10 @@ count (see "Section count and order must match the PPTX" below).
   carry over legacy OpenAI-TTS-style `voice: "alloy"` fields from an older
   version of this document; they have no effect on the render.
 - **`sections[*].id` (required, string, one per PPTX slide, in slide order).**
-  Must equal that slide's `section_id` exactly, or pptx2video raises. Passing
-  the same file as both `--ids-from-script` and `--script-json` (as Step 5
-  does) makes this automatic: `--ids-from-script` assigns each slide's
-  `section_id` from this file's `id` list first, then `--script-json`'s own
-  id check compares against the id it just assigned, so the two can never
-  disagree. Do not build a separate id-mapping file for this.
+  Must equal that slide's `section_id` exactly, or pptx2video raises. Pass this
+  file as `--ids-from-script` during render so pptx2video assigns each slide's
+  `section_id` from the same list bootstrap consumed. Do not build a separate
+  id-mapping file for this.
 - **`sections[*].heading`.** Cosmetic; used only in the assembled report
   metadata. Not spoken.
 - **`sections[*].text`.** The spoken narration for the whole slide. Plain
@@ -45,7 +42,10 @@ count (see "Section count and order must match the PPTX" below).
   bullets) or literal code, since Edge TTS reads that syntax literally rather
   than rendering it, and speaking a code block aloud is rarely useful.
   Ending a section with sentence-final punctuation gives the TTS engine a
-  natural prosodic drop instead of a flat trail-off.
+  natural prosodic drop instead of a flat trail-off. Bootstrap distributes
+  this text across native animation targets. Never pass this page-level shape
+  to `render --script-json` after bootstrap: that override assigns all text to
+  the first block and clears the remaining blocks.
 - **`sections[*].elements` (optional, replaces `text` for that section when
   present).** For precise per-shape timing, address individual top-level
   shapes by their stable handle instead of narrating the whole slide as one
@@ -77,6 +77,11 @@ count (see "Section count and order must match the PPTX" below).
   user-supplied script; native entrance/exit animation timing comes from the
   PPTX's own `p:timing` tree (see `references/ppt_trigger_handoff.md`), not
   from a script marker.
+
+  This handle-level form is the only safe form for an intentional later
+  `render --script-json` override on an animated deck. The normal animated
+  Paper2Video path does not need that override because bootstrap already
+  persisted the per-element text.
 
 ## Section count and order must match the PPTX
 

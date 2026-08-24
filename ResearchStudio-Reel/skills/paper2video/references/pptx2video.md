@@ -29,14 +29,21 @@ print `pptx2video 0.5.x`. Every command in this file and in `SKILL.md` uses
 `python3 -m pptx2video`, never the bare `pptx2video` binary, for exactly this
 reason.
 
-## The render command Step 5 uses
+## The bootstrap and render commands Steps 4-5 use
 
 ```bash
-python3 -m pptx2video render \
+PPTX2VIDEO_WORK=$(mktemp -d)
+PPTX2VIDEO_SOURCE="$PPTX2VIDEO_WORK/video-protocol-source.pptx"
+PPTX2VIDEO_TMP="$PPTX2VIDEO_WORK/video-bundle"
+python3 -m pptx2video bootstrap \
   "<project_path>/exports/<name>.pptx" \
+  --script-json "$VIDEO_AUDIO/script.json" \
+  --output "$PPTX2VIDEO_SOURCE"
+
+python3 -m pptx2video render \
+  "$PPTX2VIDEO_SOURCE" \
   "$PPTX2VIDEO_TMP" \
   --resolution 1080p \
-  --script-json "$VIDEO_AUDIO/script.json" \
   --ids-from-script "$VIDEO_AUDIO/script.json" \
   --animation-order-policy animation-pane \
   --click-group-policy <pptx2video_click_group_policy from Step 2>
@@ -65,17 +72,19 @@ the CLI refuses to write into an existing path.
   and print a decision report path instead of rendering. `animation-pane`
   confirms up front "trust the deck's own Animation Pane order," so a real
   conflict is resolved deterministically instead of stalling the run.
-- **`--script-json PATH`.** Supplies section-level (or handle-level) narration
-  text as the authority, overriding whatever the PPTX's own Notes/Alt Text
-  carry. Required so pptx2video's narration does not silently depend on
-  ppt-master's plain-paragraph Notes (see
-  `references/ppt_trigger_handoff.md` and `references/script_json_schema.md`
-  for why that matters).
+- **`bootstrap --script-json PATH`.** Supplies page-level narration while
+  converting ppt-master's ordinary animated deck into canonical per-element
+  Notes and Alt Text. Run this once before rendering.
+- **`render --script-json PATH`.** Replaces the PPTX's narration authority.
+  Do not pass a page-level script after bootstrap: `apply_user_script()` puts
+  the whole slide transcript on the first block and clears the other blocks.
+  Use this render flag only for an explicitly handle-addressed
+  `sections[*].elements` override.
 - **`--ids-from-script PATH`.** Fixes each slide's `section_id` to this file's
-  `sections[*].id`, in order. Pass the same file used for `--script-json`
-  (paper2video's Step 4 builds exactly one file for both flags). This makes
-  pptx2video's own section-count/section-id validation pass automatically;
-  do not hand-build a separate id-mapping file.
+  `sections[*].id`, in order without replacing block narration. Pass the same
+  file used by bootstrap. This makes pptx2video's own
+  section-count/section-id validation pass automatically; do not hand-build a
+  separate id-mapping file.
 - **`--resolution {720p,1080p,1440p,4k}`, default `1080p`.** Pass `1080p`
   explicitly for a predictable, documented default; do not silently rely on
   whatever the installed CLI version happens to default to.
@@ -140,16 +149,17 @@ SVG dependencies (Playwright plus a system or bundled Chromium). Fix whatever
 `pptx2video render` synthesizes all narration audio itself, automatically,
 using Edge TTS (`generate_edge_audio.py`, default voice
 `en-US-AriaNeural`). Paper2Video does not pre-synthesize any MP3 and does not
-pass a `--voice` flag by default; `--script-json`'s `text` is spoken content,
-not a file of pre-rendered audio. See `references/script_json_schema.md` for
-the exact schema `--script-json` and `--ids-from-script` both read.
+pass a `--voice` flag by default. Bootstrap distributes the page-level
+`script.json` text into the PPTX protocol; render then speaks that preserved
+per-element protocol. See `references/script_json_schema.md` for the exact
+schema.
 
 ## Advanced authoring surface
 
 For direct manual edits to an already-rendered deck (handle-level Notes/Alt
-Text markers, `--baseline-pptx` re-renders, `pptx2video bootstrap`), use the
-installed `/pptx2video` skill directly and read its own
+Text markers or `--baseline-pptx` re-renders), use the installed
+`/pptx2video` skill directly and read its own
 `references/cli.md` and `references/editable_pptx.md`. Those flows are
-outside this skill's one supported route (paper -> ppt-master -> `render`);
-this skill's Step 5 command above is the only render invocation this skill's
-protocol issues.
+outside this skill's one supported route (paper -> ppt-master -> `bootstrap`
+-> `render`); this skill's Step 5 command above is the only render invocation
+this skill's protocol issues.

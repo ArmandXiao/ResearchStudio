@@ -17,7 +17,7 @@ paper.pdf
   -> assets/meta/paper_spec.md + assets/meta/narration.json
   -> ppt_options_contract.py resolve-ppt-trigger          (ONE trigger decision)
   -> installed ppt-master skill                          (full workflow, receives the trigger)
-  -> installed pptx2video skill / CLI `pptx2video render` (full workflow, receives the trigger)
+  -> installed pptx2video skill / CLI `bootstrap` then `render` (full workflow, receives the trigger)
   -> ppt_stage_validator.py audit-final-pptx-trigger      (proves the handoff held)
   -> video.mp4, video_no_subtitles.mp4, video.pptx
 ```
@@ -288,16 +288,16 @@ If the deck should carry no entrance animation at all (`-a none`, ppt-master's
 own default), the `--animation-trigger` flag is irrelevant and may be omitted;
 the resolved value only matters once `-a` requests an actual entrance effect.
 Leave speaker notes enabled (ppt-master's default; do not pass `--no-notes`)
-even though Step 4 does not rely on ppt-master's raw Notes text as the
-narration source -- see the note on notes format below.
+so Step 4 can replace its raw Notes with pptx2video's canonical per-element
+protocol -- see the note on notes format below.
 
 **ppt-master Notes are not pptx2video's Notes protocol.** ppt-master's
 `markdown_to_plain_text()` writes plain presenter-note paragraphs, not
 pptx2video's canonical `## [handle] semantic` block grammar. pptx2video treats
 ordinary presenter notes as absent narration and falls back to a generic
-per-shape handle. Do not assume the raw ppt-master PPTX is narration-ready;
-Step 4 supplies narration explicitly via `--script-json` instead of relying on
-ppt-master's Notes text.
+per-shape handle. Do not render an animated raw ppt-master PPTX directly.
+Step 4 first bootstraps the page-level narration into handle-addressed Notes
+and Alt Text.
 
 Before invoking ppt-master, prepare title-slide utility assets when a
 `paper2assets` package exists:
@@ -320,7 +320,7 @@ placeholders.
 Confirm the export produced a PPTX at `<project_path>/exports/<name>.pptx`
 before continuing to Step 4.
 
-## Step 4: Prepare narration for pptx2video
+## Step 4: Prepare narration and bootstrap the editable protocol
 
 Build a `script.json` from the shared `narration.json` so pptx2video's
 narration authority is explicit and does not depend on ppt-master's raw Notes
@@ -337,7 +337,7 @@ text:
 
 `assets/meta/narration.json` from paper2assets already has this
 `{"id", "heading", "text"}` shape; it can be used directly as the
-`--script-json` input in Step 5 provided its section count matches the PPTX
+`bootstrap --script-json` input provided its section count matches the PPTX
 slide count. The number of sections in this file must equal the number of
 slides in the deck exported in Step 3, in the same order; pptx2video rejects a
 section-count mismatch. When ppt-master's page-count resolution produced a
@@ -347,22 +347,36 @@ or edit the `script.json` copy so its section count and order match the
 delivered PPTX exactly. Do not truncate or duplicate sections to force a
 match.
 
-Passing this same file as `--ids-from-script` in Step 5 also fixes each
-slide's internal `section_id` to this file's `sections[*].id` order, so
-pptx2video's own section-id validation is satisfied automatically; do not
-build a separate id-mapping file.
+Bootstrap the ordinary animated deck once. This divides each slide's
+page-level narration across its animation targets and writes canonical
+handle-addressed Notes and Alt Text:
+
+```bash
+PPTX2VIDEO_WORK=$(mktemp -d)
+PPTX2VIDEO_SOURCE="$PPTX2VIDEO_WORK/video-protocol-source.pptx"
+PPTX2VIDEO_TMP="$PPTX2VIDEO_WORK/video-bundle"
+python3 -m pptx2video bootstrap \
+  "<project_path>/exports/<name>.pptx" \
+  --script-json "$VIDEO_AUDIO/script.json" \
+  --output "$PPTX2VIDEO_SOURCE"
+```
+
+Treat a non-zero bootstrap exit as blocking. Do not replace
+`$PPTX2VIDEO_SOURCE` with the raw ppt-master export in Step 5.
 
 ## Step 5: Render through pptx2video, passing the same resolved trigger
 
-Render into a fresh output directory; it must not already exist.
+Render the bootstrapped PPTX into the fresh output directory. Pass the
+page-level script only as `--ids-from-script`: this preserves the per-element
+narration written in Step 4 while fixing each slide's internal `section_id`.
+Do not use `--script-json` for this render; it would put the entire slide
+transcript on the first animation element while clearing the others.
 
 ```bash
-PPTX2VIDEO_TMP=$(mktemp -d)/video-bundle
 python3 -m pptx2video render \
-  "<project_path>/exports/<name>.pptx" \
+  "$PPTX2VIDEO_SOURCE" \
   "$PPTX2VIDEO_TMP" \
   --resolution 1080p \
-  --script-json "$VIDEO_AUDIO/script.json" \
   --ids-from-script "$VIDEO_AUDIO/script.json" \
   --animation-order-policy animation-pane \
   --click-group-policy <pptx2video_click_group_policy from Step 2>
@@ -507,7 +521,7 @@ The generic render runtime is not owned or vendored by this skill. Install
   (PATH, `--no-qa` not existing, click-group-policy defaults) that make an
   almost-right invocation silently diverge from the protocol.
 - `references/script_json_schema.md` - the `script.json` schema Step 4
-  builds and Step 5 passes as `--script-json` / `--ids-from-script`,
+  passes to `bootstrap` and Step 5 passes only as `--ids-from-script`,
   including the handle-level `elements` form and TTS text gotchas.
 - `references/ppt_trigger_handoff.md` - deep dive on the four-concept model,
   the native OOXML mechanics behind it, and the failure modes this skill's

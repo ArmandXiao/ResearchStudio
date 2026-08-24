@@ -1,267 +1,306 @@
 ---
 name: paper2video
-description: >
-  Turn a research paper, a paper2assets package, or an existing PPT deck into a
-  narrated MP4 video. Prefer the shared paper2assets package when present so
-  paper2poster, paper2blog, paper2slides, and paper2video use the same section
-  order and narration. Preserve the advanced deck route by delegating slide
-  authoring to the installed `ppt-master` skill, then synthesize audio
-  with `skills/paper2poster/scripts/generate_audio.py`, then delegate generic
-  rendering, subtitles, timeline assembly, and strict media QA to the installed
-  `pptx2video` package.
+description: Turn a research paper, a paper2assets package, or an existing PPT deck into a narrated MP4 video by fully delegating slide authoring to the installed ppt-master skill and fully delegating rendering, subtitles, timeline assembly, and strict media QA to the installed pptx2video skill and its public CLI. Resolves one explicit animation-trigger decision (on-click or after-previous) and hands it to both child skills so the delivered PPTX and the delivered MP4 never disagree, then audits the final PPTX's native p:timing tree to prove the handoff held. Use when the user wants a paper turned into a video, wants /paper2video, or wants a narrated MP4 plus editable PPTX from a paper2assets bundle.
+allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, AskUserQuestion, WebFetch, WebSearch
 ---
 
-# paper2video - paper/assets/deck -> narrated MP4
+# paper2video - paper/assets -> ppt-master deck -> pptx2video render -> narrated MP4
 
-`paper2video` is an orchestrator. It does not try to replace poster extraction,
-deck authoring, TTS, or ffmpeg compositing. It wires the current best pieces
-together:
+`paper2video` is a thin orchestrator with exactly one supported path. It does
+not author slides itself, does not synthesize audio itself, does not
+composite video itself, and does not gate QA itself. It resolves inputs and
+one shared trigger decision, then fully delegates:
 
 ```text
 paper.pdf
-  -> skills/paper2assets/scripts/build_package.py
-  -> assets/meta/sections.json + assets/meta/narration.json
-  -> deck source (ppt-master / paper2slides / existing PPTX)
-  -> assets/audio/*.mp3 from skills/paper2poster/scripts/generate_audio.py
-  -> raw MP4 from python -m pptx2video.render_video
-  -> timeline.json from python -m pptx2video.build_timeline
-  -> video.mp4 from python -m pptx2video.add_subtitles
+  -> skills/paper2assets/scripts/build_package.py       (shared package)
+  -> assets/meta/paper_spec.md + assets/meta/narration.json
+  -> ppt_options_contract.py resolve-ppt-trigger          (ONE trigger decision)
+  -> installed ppt-master skill                          (full workflow, receives the trigger)
+  -> installed pptx2video skill / CLI `pptx2video render` (full workflow, receives the trigger)
+  -> ppt_stage_validator.py audit-final-pptx-trigger      (proves the handoff held)
+  -> video.mp4, video_no_subtitles.mp4, video.pptx
 ```
 
-The important branch-level contract is this: when a `paper2assets` package is
-available, `narration.json` is the canonical narration order. Use it for TTS,
-video frame/audio pairing, and subtitle timing. This keeps paper2poster,
-paper2blog, paper2slides, and paper2video aligned.
+**There is only one route.** An earlier version of this skill had a second,
+self-implemented "Route A" that called private narration, duration, and
+visual-cue scripts and invoked `python -m pptx2video.render_video` /
+`pptx2video.build_timeline` / `pptx2video.check_video_package` as if they were
+importable submodules of the installed public package. Those modules do not
+exist at that import path in the public `pptx2video` 0.5.x CLI; the entry
+points are the `pptx2video render`, `pptx2video doctor`, and `pptx2video
+bootstrap` subcommands. Do not recreate that shortcut. Do not hand-assemble a
+narration script, a visual-cue file, or a "simplified" render pipeline that
+skips the installed `pptx2video` skill. Do not invoke any private submodule
+path under `pptx2video.*`. Every render goes through `/pptx2video` (the
+installed skill) or the exact `pptx2video render` CLI invocation in Step 5;
+there is no lower-effort fallback for a rushed or low-context session.
+
+## Why full delegation is mandatory
+
+`pptx2video render` is not a smoke-test wrapper. Its own CLI (`cli.py`
+`_render()`) reads `assets/meta/reports/video_qa_report.json` after every
+render and raises `SystemExit` unless `passed` is true with zero errors and
+zero warnings; the top-level CLI does not even expose a `--no-qa` flag, so an
+agent invoking `pptx2video render` directly cannot silently skip strict QA. A
+hand-rolled call into an internal module could skip that gate. This is the
+concrete mechanism this skill relies on to stop an agent from cutting corners
+under time pressure: route every render through the command in Step 5, and
+treat a non-zero exit as a blocking failure to fix, never as a reason to fall
+back to a simpler local script.
+
+## Two child skills, one shared trigger decision
+
+This skill's own job is narrow: resolve inputs, resolve one `ppt_trigger`
+value, pass it identically to both child skills, and verify the delivered
+PPTX actually carries it. Everything else belongs to the child skills:
+
+- **`ppt-master`** authors the deck: SVG pages, the Strategist confirmation
+  stage, speaker notes, and PPTX export including native entrance-animation
+  triggers (`--animation-trigger`).
+- **`pptx2video`** renders the deck: TTS, word-boundary timing, animation
+  scheduling, subtitles, timeline, and strict media QA
+  (`assets/meta/reports/video_qa_report.json`).
+
+Both read PowerPoint's native `p:timing` tree, but for different purposes:
+ppt-master writes it, and pptx2video's video scheduler reads native row order
+and narration timing from it, never the click-group number. If each of these
+two skills is allowed to pick its own default trigger, they can produce a
+PPTX/MP4 pair whose native badges and playback pacing quietly disagree. This
+skill's Step 2 exists specifically to prevent that.
+
+### The four concepts the old protocol conflated
+
+The single native `p:timing` tree has to answer four different questions, and
+the previous version of this skill's protocol used only one field
+(click-group number) to try to answer all of them, which fails whenever a
+deck uses `after-previous`:
+
+| Concept | What it means | Where it lives | Whose default wins |
+|---|---|---|---|
+| `effect_order` | Real entrance-animation sequence, 1..N, independent of trigger type | Native Animation Pane row order (`p:cTn` order inside `mainSeq`) | Fixed by authoring order; never inferred from click-group number |
+| `ppt_trigger` | The one user-facing intent: `on-click` or `after-previous` | Resolved once by this skill's `resolve-ppt-trigger` command | This skill, not ppt-master's own CLI default, not pptx2video's own CLI default |
+| `click_group` | PowerPoint's own derived click-group badge, shown in the Animation Pane UI | Computed by PowerPoint/pptx2video's `--click-group-policy` from trigger topology | A side effect, never a source of truth |
+| `video_start` | When a phase plays in the rendered MP4 | pptx2video's narration/timeline scheduler, keyed to `effect_order` plus word-boundary timing | pptx2video's renderer; click-group number is never consulted |
+
+The failure this fixes: a deck with 38 `after-previous` effects is fully
+valid OOXML, but PowerPoint places every `after-previous` (automatic) effect
+in the same native click group, commonly all showing `0` in the Animation
+Pane's click-group column. That is expected PowerPoint behavior for automatic
+effects, not data loss and not a rendering bug; `effect_order` (Pane row
+order) still exists and is exactly what pptx2video's scheduler uses to place
+each phase in the video's timeline, together with narration/word timing. The
+problem in the old protocol was documentation and verification, not the
+underlying render: nothing told the agent to pick `ppt_trigger` on purpose
+before authoring, hand it to both children identically, and check the
+delivered file. This skill's Step 2 and Step 6 close exactly that gap.
 
 ## Paths
 
 Run Paper2Video workflow commands from `ResearchStudio-Reel/` unless noted.
 
 ```bash
-PAPER2POSTER=skills/paper2poster
 PAPER2VIDEO=skills/paper2video
 PAPER2ASSETS=skills/paper2assets
 ```
 
-Install both external skills before starting Paper2Video. Do not clone or
-vendor either dependency inside ResearchStudio:
+Install both external skills before starting. Do not clone or vendor either
+dependency inside ResearchStudio:
 
 ```bash
 npx skills add hugohe3/ppt-master --skill ppt-master
 npx skills add ai-nuts/pptx2video --skill pptx2video
 ```
 
-Install and verify the compatible public `pptx2video` 0.5.x CLI runtime before
-either route. Use a Python 3.11 or newer environment:
+Install and verify the compatible public `pptx2video` 0.5.x CLI runtime. Use a
+Python 3.11 or newer environment:
 
 ```bash
 python -m pip install \
   'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
 python -m playwright install chromium
-pptx2video --version
-pptx2video doctor --svg
+python3 -m pptx2video --version
+python3 -m pptx2video doctor --svg
 ```
 
-Do not hard-code a host-specific skill directory. Users may run this repository
-from Codex, Claude Code, a shell, or another agent. Existing or edited decks can
-also invoke the installed skill directly with `/pptx2video`.
+**Always invoke the runtime as `python3 -m pptx2video ...`, never as the bare
+`pptx2video` command.** A host may have an older `pptx2video` (for example
+`0.3.0`) earlier on `PATH` than the intended `0.5.x` install; the bare command
+then silently resolves to the wrong version with no error. `python3 -m
+pptx2video --version` must print `pptx2video 0.5.x`; a different major/minor
+version means fix the environment (`pip install` target, `PATH`, virtualenv)
+before continuing, not proceed and hope the CLI surface still matches this
+document.
 
-Paper2Video owns paper-specific orchestration and visual-cue preparation. The
-installed package owns the generic audio timing, video composition, subtitle,
-timeline, and media-QA modules used below.
+Do not hard-code a host-specific skill directory. Users may run this
+repository from Codex, Claude Code, a shell, or another agent. This skill
+itself never calls a private path under `pptx2video.*`; it always calls the
+installed skill (`/pptx2video`) or the public `pptx2video render` /
+`pptx2video doctor` / `pptx2video bootstrap` CLI subcommands.
 
-## Route A Output Contract
+## Output Contract
 
-Follow the shared paper2assets v2 layout. The paper2video bundle top level holds
-only deliverable files plus `manifest.json`; all audio, captions, slide decks,
-clips, rendered frames, reports, and timeline/cue metadata live under `assets/`:
+Follow the shared paper2assets v2 layout. The bundle top level holds only
+deliverable files plus `manifest.json`; everything else lives under `assets/`:
 
 ```text
 <video_outdir>/
   video.mp4                  # required, burned-in subtitles in an appended black bottom band
   video_no_subtitles.mp4     # required, raw/pre-subtitle playback copy for paper2reel
-  video.pptx                 # required, for follow-up editing
-  manifest.json
+  video.pptx                 # required, the same delivered deck pptx2video rendered from
+  manifest.json              # schema_version "paper2video.v1", layout "v2-assets"
   assets/
-    audio/                         # script.json, *.mp3, word timings, TTS manifests
-    captions/                      # video.srt, video.vtt
-    slides/                        # slides.pptx, rendered slide frames, ppt-master export copy
-    clips/                         # raw render and optional segment clips
-    meta/                          # duration reports, timeline, visual cues, QA reports
+    audio/                          # script.json, per-block TTS, word timings
+    captions/                       # video.srt, video.vtt
+    slides/                         # rendered slide frames used by the MP4
+    clips/                          # raw render intermediate
+    meta/                           # timeline.json, QA and authority reports
 ```
 
-Initialize it before running Route A. Route B must skip this scaffolding and
-pass a destination that does not yet exist to the standalone CLI:
+This layout, and every file inside it, is produced by `pptx2video render`
+itself; Step 5 below is the only place this skill writes into
+`<video_outdir>`. Do not hand-assemble any part of this tree before that step.
 
-**Pick `<video_outdir>` (resolve BEFORE any file writes).** The bundle directory is shared across every paper2* skill — when paper2assets, paper2poster, paper2blog, and paper2video target the same root, the video's slides/audio/clips sit next to the poster's HTML, the blog's `.docx`, and the shared narration script in one self-contained package. Resolve deterministically:
+**Pick `<video_outdir>` before any file writes.** Resolve deterministically:
 
-1. **An explicit `<video_outdir>` argument from the caller wins** — honor it verbatim. The defaults below only fire when no path was passed.
-2. **A `paper2assets` package already exists** → reuse its folder verbatim as `<video_outdir>`. The canonical detection signal is `<dir>/assets/meta/paper_spec.md` (the cross-skill source of truth produced by `paper2assets` Step 4); `<dir>/manifest.json` with `"layout": "v2-assets"` is a confirming hint when present. Writing into the same bundle means Route A reads `assets/meta/narration.json` from the same root it writes `assets/audio/*.mp3` into, with no path swap — and downstream tools that walk `manifest.json` see the video MP4s alongside everything else.
-3. **Otherwise (a bare PDF is the only input)** → default to **`<input_pdf_dir>/<pdf_stem>/`** — the directory containing the input PDF, then a subfolder named after the PDF basename (no extension). Example: `papers/8008_Ink3D_Sculpting.pdf` → `<video_outdir> = papers/8008_Ink3D_Sculpting/`. This matches the `paper2assets` default convention, so if Route A invokes `paper2assets`'s `build_package.py` below it lands in the same bundle without a later move.
+1. **An explicit `<video_outdir>` argument from the caller wins.** Honor it
+   verbatim; the defaults below only fire when no path was passed.
+2. **A `paper2assets` package already exists** -> reuse its folder verbatim as
+   `<video_outdir>`. The canonical detection signal is
+   `<dir>/assets/meta/paper_spec.md`; `<dir>/manifest.json` with
+   `"layout": "v2-assets"` is a confirming hint when present.
+3. **Otherwise (a bare PDF is the only input)** -> default to
+   `<input_pdf_dir>/<pdf_stem>/`, matching the `paper2assets` default
+   convention so a later `paper2assets` run lands in the same bundle.
 
-`$VIDEO_OUT` and `$PAPER_ASSETS` are the SAME directory under this rule. The two variable names persist below for readability — `$PAPER_ASSETS` is used where the snippet emphasizes "I'm reading paper2assets meta", `$VIDEO_OUT` where it emphasizes "I'm writing the video bundle" — but in practice they always point at one root.
+`pptx2video render` refuses to write into a path that already exists, so Step
+5 renders into a fresh temporary bundle for exactly this reason and then this
+skill promotes the result into `<video_outdir>` (see Step 5).
+
+## Step 1: Build or reuse the shared paper2assets package
 
 ```bash
-# 1. Resolve $VIDEO_OUT per the rule above. $PAPER_ASSETS aliases the same path.
-if [[ -n "$video_outdir_arg" ]]; then
-  VIDEO_OUT="$video_outdir_arg"                                  # explicit caller arg wins
-elif [[ -f "$paper2assets_dir/assets/meta/paper_spec.md" ]]; then
-  VIDEO_OUT="$paper2assets_dir"                                  # reuse the paper2assets bundle
-else
-  VIDEO_OUT="$(dirname "$paper_pdf")/$(basename "$paper_pdf" .pdf)"
-fi
-PAPER_ASSETS="$VIDEO_OUT"  # one bundle root — Route A reads paper2assets meta from here
-
-# 2. Create the assets/ scaffolding under that root
-VIDEO_ASSETS=$VIDEO_OUT/assets
-VIDEO_AUDIO=$VIDEO_ASSETS/audio
-VIDEO_CAPTIONS=$VIDEO_ASSETS/captions
-VIDEO_SLIDES=$VIDEO_ASSETS/slides
-VIDEO_CLIPS=$VIDEO_ASSETS/clips
-VIDEO_META=$VIDEO_ASSETS/meta
-mkdir -p "$VIDEO_AUDIO" "$VIDEO_CAPTIONS" "$VIDEO_SLIDES" "$VIDEO_CLIPS" "$VIDEO_META/reports"
+python skills/paper2assets/scripts/build_package.py <paper.pdf> --outdir "$VIDEO_OUT"
 ```
 
-The MP4 produced directly by `python -m pptx2video.render_video` is the raw
-no-subtitle render.
-Keep an audit copy under `$VIDEO_CLIPS/video_raw.mp4`, and also copy it to
-`$VIDEO_OUT/video_no_subtitles.mp4` as a required deliverable. The default
-playback deliverable with burned-in subtitles is `$VIDEO_OUT/video.mp4`.
-
-## Two Supported Routes
-
-### Route A - paper2assets-aligned paper video
-
-Use this when we want the video content to match paper2poster/paper2blog.
-
-1. Build or reuse the shared package:
-
-```bash
-python skills/paper2assets/scripts/build_package.py <paper.pdf> --outdir "$PAPER_ASSETS"
-```
-
-If `paper_spec.md` already exists, sync structured claims and narration:
+If `paper_spec.md` already exists, sync structured claims and narration
+instead of re-extracting:
 
 ```bash
 python skills/paper2assets/scripts/build_package.py <paper.pdf> \
-  --outdir "$PAPER_ASSETS" \
+  --outdir "$VIDEO_OUT" \
   --skip-extract \
-  --paper-spec "$PAPER_ASSETS/assets/meta/paper_spec.md"
+  --paper-spec "$VIDEO_OUT/assets/meta/paper_spec.md"
 ```
 
-2. Export video narration inputs from the shared package:
+`assets/meta/narration.json` is the canonical narration order for this run:
+one `{"id", "heading", "text"}` entry per section, in the same order poster,
+blog, and video all use. Do not reorder or rewrite it here; ppt-master reads
+the paper2assets package to author slides in this order, and Step 4 passes
+narration to pptx2video from the same source.
+
+## Step 2: Resolve the one shared `ppt_trigger` decision
+
+This is the single most important step in this skill. Resolve `ppt_trigger`
+**before** invoking ppt-master, and pass the exact same resolved value to both
+ppt-master and pptx2video. Never let either child skill fall back to its own
+independent default.
 
 ```bash
-python skills/paper2video/scripts/assets_to_script.py "$PAPER_ASSETS" \
-  --out "$VIDEO_AUDIO/script.json" \
-  --notes-dir "$VIDEO_META/notes"
+python3 skills/paper2video/scripts/ppt_options_contract.py resolve-ppt-trigger \
+  --ppt-trigger {auto,on-click,after-previous}
 ```
 
-For meeting-style duration targets, shape narration before TTS:
+- Omit `--ppt-trigger`, or pass `auto`, when the user has not stated a
+  preference. This resolves to `on-click`, because a downloaded PPTX with a
+  continuous `1..N` Animation Pane badge sequence is the more broadly useful
+  default deliverable, and the rendered MP4 still auto-plays with no manual
+  click either way (see below).
+- Pass `on-click` explicitly when the user wants a presenter-controllable,
+  numbered PPTX.
+- Pass `after-previous` only when the user explicitly asks for a PPTX that
+  also auto-plays natively in PowerPoint (not merely "a video that plays
+  itself" -- the rendered MP4 always plays itself regardless of this choice).
 
-```bash
-python skills/paper2video/scripts/assets_to_script.py "$PAPER_ASSETS" \
-  --target-minutes 3 \
-  --duration-tolerance-seconds 30 \
-  --out "$VIDEO_AUDIO/script.json" \
-  --notes-dir "$VIDEO_META/notes" \
-  --duration-plan-out "$VIDEO_META/duration_plan.json" \
-  --duration-rewrite-request-out "$VIDEO_META/duration_rewrite_request.json"
+The command prints one JSON object; treat every field as a literal value to
+carry into the next two steps, not as a suggestion:
+
+```json
+{
+  "ppt_trigger": "on-click",
+  "ppt_master_animation_trigger": "on-click",
+  "pptx2video_click_group_policy": "normalize"
+}
 ```
 
-When the current narration already fits the target estimate, this writes:
-
-```text
-$VIDEO_AUDIO/script.json         # generate_audio.py-compatible script
-$VIDEO_META/notes/<id>.md        # subtitle-friendly notes, same ids/order
-$VIDEO_META/duration_plan.json   # when --target-minutes is used
+```json
+{
+  "ppt_trigger": "after-previous",
+  "ppt_master_animation_trigger": "after-previous",
+  "pptx2video_click_group_policy": "preserve"
+}
 ```
 
-When semantic rewriting is required, it writes `duration_plan.json` and
-`duration_rewrite_request.json` instead of a final `script.json`. Fill the
-request with rewritten prose, then rerun:
+`ppt_master_animation_trigger` is the exact value for ppt-master's
+`--animation-trigger` flag in Step 3. `pptx2video_click_group_policy` is the
+exact value for pptx2video's `--click-group-policy` flag in Step 5. Both come
+from this one command so the two child skills can never disagree about the
+user's trigger intent. Record the printed JSON (for example into
+`$VIDEO_OUT/assets/meta/ppt_trigger_handoff.json`) so Step 6's audit and any
+retry use the same resolved value.
 
-```bash
-python skills/paper2video/scripts/assets_to_script.py "$PAPER_ASSETS" \
-  --target-minutes 3 \
-  --duration-rewrite-in "$VIDEO_META/duration_rewrites.json" \
-  --out "$VIDEO_AUDIO/script.json" \
-  --notes-dir "$VIDEO_META/notes" \
-  --duration-plan-out "$VIDEO_META/duration_plan.json"
-```
+**Why the rendered MP4 auto-plays either way.** pptx2video's video scheduler
+places every entrance phase in the timeline using native Animation Pane row
+order (`effect_order`) plus narration/word-boundary timing; it never consults
+PowerPoint's click-group number. Choosing `on-click` changes only what the
+downloaded PPTX looks like when a human opens it in PowerPoint. It does not
+make the MP4 wait for a click.
 
-Duration control is a two-stage contract:
+## Step 3: Author the deck with ppt-master, passing the resolved trigger
 
-1. Plan narration against `--target-minutes` before TTS. If the current script
-   is clearly too long or too short, the helper writes
-   `duration_rewrite_request.json` and stops. The agent must rewrite each
-   requested section as a complete narration within its word budget; do not
-   truncate by keeping only the first sentences.
-2. After the first audio/video render, run `plan_tts_rate.py` against the real
-   duration report. Use the generated rate plan only for small residual timing
-   errors. If the plan says `needs_script_rewrite`, regenerate the script
-   instead of forcing an unnatural speech rate.
+Invoke the installed `ppt-master` skill and follow its full workflow: source
+conversion, project init/import, the Strategist confirmation stage (fields a
+through h, MANDATORY, cannot be skipped), optional image acquisition,
+sequential page-by-page SVG authoring, `svg_quality_checker.py`, then the
+three-command export pipeline run one command at a time
+(`total_md_split.py`, `finalize_svg.py`, `svg_to_pptx.py`).
 
-```bash
-python skills/paper2video/scripts/plan_tts_rate.py \
-  --duration-plan "$VIDEO_META/duration_plan.json" \
-  --duration-report "$VIDEO_META/video_duration_report.json" \
-  --target-minutes 3 \
-  --out "$VIDEO_AUDIO/tts_rate_plan.json"
-
-python -m pptx2video.generate_edge_audio \
-  "$VIDEO_AUDIO/script.json" \
-  --outdir "$VIDEO_AUDIO" \
-  --rate-plan "$VIDEO_AUDIO/tts_rate_plan.json" \
-  --timings-out "$VIDEO_AUDIO/word_timings.json"
-```
-
-If the video deck has fewer slides than `narration.json`, pass an explicit
-comma-separated order:
-
-```bash
-python skills/paper2video/scripts/assets_to_script.py "$PAPER_ASSETS" \
-  --ids title,problem,motivation,method,key-result,takeaway \
-  --out "$VIDEO_AUDIO/script.json" \
-  --notes-dir "$VIDEO_META/notes"
-```
-
-3. Create or provide a PPTX whose slide order matches the script sections.
-This can come from `ppt-master`, a future `paper2slides`, or a user-provided
-deck. The video compositor only requires a PPTX plus matching MP3s, but the
-default high-quality route is `ppt-master`.
-
-`ppt-master` discipline:
-
-- An existing `ppt-master/examples/<topic>` project is optional reuse, not a
-  prerequisite. If no suitable example exists, start a fresh ppt-master project
-  from the paper/PDF or paper2assets materials and run the full ppt-master
-  skill workflow.
-- Do not replace ppt-master with handwritten SVG, a local simplified generator,
-  or a copied example deck whose content does not come from the paper.
-- Before running ppt-master, invoke the installed `ppt-master` skill and follow
-  its gates: source
-  conversion, project init/import, Strategist Eight Confirmations, optional
-  image acquisition, sequential page-by-page SVG authoring by the main agent,
-  `svg_quality_checker.py`, `total_md_split.py`, `finalize_svg.py`, and
-  `svg_to_pptx.py`.
+- Do not replace ppt-master with handwritten SVG, a local simplified
+  generator, or a copied example deck whose content does not come from the
+  paper.
 - If ppt-master reaches a blocking confirmation gate and the user has not
-  already approved defaults, stop and ask the user. Do not mark the route as
-  unavailable merely because the deck does not already exist.
-- If a machine dependency is missing, record the concrete missing dependency and
-  stop. Do not silently degrade to a different slide-generation method.
+  already approved defaults, stop and ask the user.
+- If a machine dependency is missing, record the concrete missing dependency
+  and stop. Do not silently degrade to a different slide-generation method.
+- Pass `$PAPER_ASSETS/assets/meta/narration.json` sections (or the paper/PDF
+  content directly) as the source content; do not invent claims absent from
+  the paper.
 
-Resolve PPT options once before invoking ppt-master. Content-related Auto values
-(page count, narrative mode, audience, images, and formulas) remain paper-aware
-model decisions. Appearance Auto values (visual style, color direction, and
-typography direction) are selected from the canonical finite pools by
-`resolve_auto_ppt_appearance()` using the immutable task token. Persist that
-appearance receipt with the validated resolution in `resolved_options.json`,
-then reuse the merged locked configuration for every downstream step and retry.
-Never rerandomize an in-progress task. Explicit appearance values are unchanged.
+Pass ppt-master's `--animation-trigger` flag exactly as
+`resolve_ppt_trigger_handoff` returned in Step 2:
 
-When using `ppt-master`, prepare title-slide utility assets before invoking the
-deck workflow:
+```bash
+python3 ${SKILL_DIR}/scripts/svg_to_pptx.py <project_path> \
+  --animation-trigger <ppt_master_animation_trigger from Step 2>
+```
+
+If the deck should carry no entrance animation at all (`-a none`, ppt-master's
+own default), the `--animation-trigger` flag is irrelevant and may be omitted;
+the resolved value only matters once `-a` requests an actual entrance effect.
+Leave speaker notes enabled (ppt-master's default; do not pass `--no-notes`)
+even though Step 4 does not rely on ppt-master's raw Notes text as the
+narration source -- see the note on notes format below.
+
+**ppt-master Notes are not pptx2video's Notes protocol.** ppt-master's
+`markdown_to_plain_text()` writes plain presenter-note paragraphs, not
+pptx2video's canonical `## [handle] semantic` block grammar. pptx2video treats
+ordinary presenter notes as absent narration and falls back to a generic
+per-shape handle. Do not assume the raw ppt-master PPTX is narration-ready;
+Step 4 supplies narration explicitly via `--script-json` instead of relying on
+ppt-master's Notes text.
+
+Before invoking ppt-master, prepare title-slide utility assets when a
+`paper2assets` package exists:
 
 ```bash
 python skills/paper2assets/scripts/fetch_logos.py \
@@ -270,633 +309,206 @@ python skills/paper2assets/scripts/make_qr.py \
   --outdir "$PAPER_ASSETS" --from-metadata "$PAPER_ASSETS/assets/meta/metadata.json" || true
 ```
 
-If `assets/meta/paper_spec.md` is not available yet, skip `fetch_logos.py`; do
-not invent logos. `make_qr.py` is best-effort and only uses `paper_url`,
-`code_url`, or the documented `arxiv_id` paper fallback from
-`assets/meta/metadata.json`.
+Skip `fetch_logos.py` when `paper_spec.md` is not available; do not invent
+logos. `make_qr.py` is best-effort and only uses `paper_url`, `code_url`, or
+the documented `arxiv_id` fallback from `metadata.json`. Add a requirement
+block to the ppt-master prompt covering restrained placement of these assets
+on slide 1 (right-side title area or lower-right safe zone), and instruct
+ppt-master to omit unavailable assets cleanly rather than leaving broken
+placeholders.
 
-Add this requirement block to the prompt given to `ppt-master`:
+Confirm the export produced a PPTX at `<project_path>/exports/<name>.pptx`
+before continuing to Step 4.
 
-```text
-Title slide assets:
-- Use the local institute logo files under <paper2assets_outdir>/assets/logos/ when present.
-- Use <paper2assets_outdir>/assets/qr/code.png as a labeled "Code" QR tile when present. If
-  <paper2assets_outdir>/assets/qr/paper.png is present, it may appear as a smaller labeled
-  "Paper" tile. Never fabricate a missing code URL or QR.
-- Place these assets as a restrained utility cluster on slide 1, preferably in
-  the right-side title area or lower-right safe zone. Keep the paper title and
-  main visual hierarchy dominant; logos and QR tiles should be crisp, aligned,
-  readable at 1080p video size, and visually integrated with the deck palette.
-- Omit unavailable assets cleanly. Do not leave broken image placeholders,
-  literal file paths, or empty boxes.
-```
+## Step 4: Prepare narration for pptx2video
 
-When the final video will use highlight/cursor attention, also generate cue
-anchor requirements before invoking ppt-master:
-
-```bash
-python skills/paper2video/scripts/generate_cue_requirements.py \
-  "$VIDEO_AUDIO/script.json" \
-  --out "$VIDEO_META/visual_cue_requirements.json" \
-  --contract-out "$VIDEO_META/visual_anchor_contract.json" \
-  --markdown-out "$VIDEO_META/visual_cue_requirements.md"
-```
-
-Add the generated `visual_cue_requirements.md` to the ppt-master prompt. It
-asks the slide authoring pass to place stable semantic anchors in PPTX shape
-name/alt text and, when SVG/HTML is produced, in SVG IDs, `<title>`, `<desc>`,
-or `data-cue-label` attributes. Those anchors make the post-hoc cue matcher
-verify exact contract alignment instead of guessing the intended target from
-generic shapes.
-
-Anchor contract for ppt-master:
-
-- Add only a few anchors per slide, normally 2-5, focused on visible content
-  that narration actually discusses.
-- Prefer stable PPTX/SVG ids that start with `cue_`, for example
-  `cue_s08_c2_multi_head_attention`.
-- Put the same id and narration keywords in PPTX shape name/alt text and in SVG
-  `<title>`, `<desc>`, or `data-cue-label`; with `--anchor-contract`, the cue
-  matcher requires exact `anchor_id` matches.
-- Anchor a specific diagram/card/chart/formula/row, not a whole slide, header,
-  caption, logo, QR tile, or decorative background.
-- If strict cue generation fails with low confidence, repair the slide source
-  by adding or tightening anchors before rendering highlighted video.
-- Prefer anchors that survive in both `svg_final` and the exported PPTX. The
-  video raster frames are rendered from `svg_final` when available, while the
-  PPTX remains the editable deliverable and geometry audit source.
-
-4. Generate audio:
-
-```bash
-python skills/paper2poster/scripts/generate_audio.py \
-  "$VIDEO_AUDIO/script.json" \
-  --outdir "$VIDEO_AUDIO"
-```
-
-5. For highlighted video, generate PPTX-backed visual cues before rendering.
-
-Run one cue-planning pass to locate the authored SVG anchors, inject those
-boxes into PPTX shape metadata, then run the final strict pass that requires
-PPTX anchors:
-
-```bash
-python skills/paper2video/scripts/generate_visual_cues.py <ppt_master_project> \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --audio-dir "$VIDEO_AUDIO" \
-  --pptx <deck.pptx> \
-  --anchor-contract "$VIDEO_META/visual_anchor_contract.json" \
-  --timings-json "$VIDEO_AUDIO/word_timings.json" \
-  --strict-gate \
-  --require-timestamps \
-  --out "$VIDEO_META/visual_cues.pre_pptx.json" \
-  --geometry-report-out "$VIDEO_META/geometry_resolution.pre_pptx.json" \
-  --candidate-review-out "$VIDEO_META/cue_candidate_review.pre_pptx.html" \
-  --cue-plan-out "$VIDEO_META/visual_cue_plan.pre_pptx.json"
-
-python skills/paper2video/scripts/inject_pptx_anchors.py \
-  --pptx <deck.pptx> \
-  --cue-plan "$VIDEO_META/visual_cue_plan.pre_pptx.json" \
-  --out <deck.pptx> \
-  --report "$VIDEO_META/reports/pptx_anchor_injection.json"
-
-python skills/paper2video/scripts/generate_visual_cues.py <ppt_master_project> \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --audio-dir "$VIDEO_AUDIO" \
-  --pptx <deck.pptx> \
-  --anchor-contract "$VIDEO_META/visual_anchor_contract.json" \
-  --require-pptx-anchors \
-  --timings-json "$VIDEO_AUDIO/word_timings.json" \
-  --strict-gate \
-  --require-timestamps \
-  --out "$VIDEO_META/visual_cues.json" \
-  --geometry-report-out "$VIDEO_META/geometry_resolution.json" \
-  --candidate-review-out "$VIDEO_META/cue_candidate_review.html" \
-  --cue-plan-out "$VIDEO_META/visual_cue_plan.json"
-```
-
-6. Render the video, pinning audio order to the script JSON:
-
-```bash
-python -m pptx2video.render_video "$VIDEO_OUT" \
-  --pptx <deck.pptx> \
-  --audio-dir "$VIDEO_AUDIO" \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --attention-mode highlight \
-  --highlight-style spotlight_laser \
-  --visual-cues "$VIDEO_META/visual_cues.json" \
-  --target-minutes 3 \
-  --duration-report-out "$VIDEO_META/video_duration_report.json" \
-  --out "$VIDEO_CLIPS/video_raw.mp4" \
-  --frames-out "$VIDEO_SLIDES/frames"
-```
-
-7. Burn final subtitles and place final video/deck in the normalized output.
-
-```bash
-python -m pptx2video.add_subtitles "$VIDEO_OUT" \
-  --mp4 "$VIDEO_CLIPS/video_raw.mp4" \
-  --audio-dir "$VIDEO_AUDIO" \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --srt-out "$VIDEO_CAPTIONS/video.srt" \
-  --vtt-out "$VIDEO_CAPTIONS/video.vtt" \
-  --out "$VIDEO_OUT/video.mp4"
-```
-
-The default burned-in subtitle render scales the complete slide above an
-appended solid black caption band and burns white captions inside that reserved
-band. Use `--subtitle-overlay` only when captions may cover slide pixels; in
-overlay mode, `--subtitle-box` keeps the translucent dark caption background
-and `--no-subtitle-box` requests plain text.
-Use `--no-subtitles` when the user disables captions. It still writes SRT/VTT
-for timeline and QA, but stream-copies only video/audio into `video.mp4`.
-
-```bash
-cp "$VIDEO_CLIPS/video_raw.mp4" "$VIDEO_OUT/video_no_subtitles.mp4"
-cp <deck.pptx> "$VIDEO_SLIDES/slides.pptx"
-cp <deck.pptx> "$VIDEO_OUT/video.pptx"
-```
-
-`$VIDEO_OUT/video.mp4` is the default playback deliverable with burned-in
-subtitles. `$VIDEO_OUT/video_no_subtitles.mp4` is also a required final
-deliverable for paper2reel and downstream editing, where subtitles are controlled
-by a separate VTT/CC toggle.
-
-8. Build the unified timeline contract.
-
-`timeline.json` is the canonical mapping between narration chunks, audio
-windows, subtitle cues, and visual-highlight targets. Downstream
-paper2reel must consume this file instead of guessing section start/end
-times from the final MP4.
-
-```bash
-python -m pptx2video.build_timeline \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --duration-report "$VIDEO_META/video_duration_report.json" \
-  --visual-cue-plan "$VIDEO_META/visual_cue_plan.json" \
-  --visual-cues "$VIDEO_META/visual_cues.json" \
-  --captions-vtt "$VIDEO_CAPTIONS/video.vtt" \
-  --audio-dir "$VIDEO_AUDIO" \
-  --video "$VIDEO_OUT/video_no_subtitles.mp4" \
-  --section-map "$VIDEO_META/section_slide_map.json" \
-  --out "$VIDEO_META/timeline.json"
-```
-
-`--section-map` is optional only when the script ids already are the canonical
-paper2assets section ids. When a ppt-master deck uses slide-specific ids such
-as `03_sequence_evolution`, pass an explicit map so poster sections, slides,
-blog blocks, audio, subtitles, and visual cues share the same section ids.
-Prefer the grouped form when poster sections overlap:
+Build a `script.json` from the shared `narration.json` so pptx2video's
+narration authority is explicit and does not depend on ppt-master's raw Notes
+text:
 
 ```json
 {
-  "problem": [2, 3, 4],
-  "motivation": [3, 4],
-  "headline-numbers": [2],
-  "method": [5, 6, 7, 8, 9, 10, 11, 12]
-}
-```
-
-### Route B - existing or edited PPTX via standalone pptx2video
-
-Use the independently maintained `pptx2video` package for a complete native
-PPTX. Do not copy its runtime into this skill and do not call
-`skills/paper2video/scripts/` for this route. Install it, verify its native
-dependencies, and render through the public CLI:
-
-```bash
-PPTX2VIDEO_OUT=/absolute/path/to/new-video-bundle
-python -m pip install \
-  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
-python -m playwright install chromium
-pptx2video --version
-pptx2video doctor --svg
-test ! -e "$PPTX2VIDEO_OUT"
-pptx2video render <deck.pptx> "$PPTX2VIDEO_OUT" --resolution 1080p
-```
-
-Always choose a fresh `$PPTX2VIDEO_OUT`; do not reuse the Route A `$VIDEO_OUT`
-or an existing paper2assets root. The CLI writes the complete editable video
-bundle, word-aligned captions, protocol reports, timeline, and strict QA
-evidence. It returns success only after QA passes with zero errors and zero
-warnings. Read [references/pptx2video.md](references/pptx2video.md) for the
-minimal bridge contract. The standalone package owns all detailed PPTX
-authoring, Animation Pane, geometry conflict, and Identity Map rules.
-
-## Route A Final QA Gate
-
-Run the final hard QA gate for Route A. This is not a smoke test; it checks
-the exact slide frames archived by
-`python -m pptx2video.render_video --frames-out`, probes
-audio/video streams, checks PPTX geometry for text overflow/overlap and
-undersized visuals, checks rendered-frame blank space/sparsity, verifies the
-final MP4 duration, and rejects unsafe TTS rate plans when duration control is
-requested.
-
-```bash
-python -m pptx2video.check_video_package "$VIDEO_OUT" \
-  --pptx <deck.pptx> \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --audio-dir "$VIDEO_AUDIO" \
-  --frames-dir "$VIDEO_SLIDES/frames" \
-  --mp4 "$VIDEO_OUT/video.mp4" \
-  --raw-mp4 "$VIDEO_OUT/video_no_subtitles.mp4" \
-  --subtitle-file "$VIDEO_CAPTIONS/video.vtt" \
-  --visual-cues "$VIDEO_META/visual_cues.json" \
-  --cue-plan "$VIDEO_META/visual_cue_plan.json" \
-  --timeline "$VIDEO_META/timeline.json" \
-  --rate-plan "$VIDEO_AUDIO/tts_rate_plan.json" \
-  --target-minutes 3 \
-  --require-rate-plan \
-  --require-subtitles \
-  --require-visual-cues \
-  --require-cue-plan \
-  --require-timeline \
-  --require-word-timings \
-  --strict \
-  --out "$VIDEO_META/reports/video_qa_report.json"
-```
-
-For stricter semantic-anchor enforcement, also require the anchor contract and
-PPTX-backed anchors:
-
-```bash
-python -m pptx2video.check_video_package "$VIDEO_OUT" \
-  --pptx <deck.pptx> \
-  --script-json "$VIDEO_AUDIO/script.json" \
-  --audio-dir "$VIDEO_AUDIO" \
-  --frames-dir "$VIDEO_SLIDES/frames" \
-  --mp4 "$VIDEO_OUT/video.mp4" \
-  --raw-mp4 "$VIDEO_OUT/video_no_subtitles.mp4" \
-  --subtitle-file "$VIDEO_CAPTIONS/video.vtt" \
-  --visual-cues "$VIDEO_META/visual_cues.json" \
-  --cue-plan "$VIDEO_META/visual_cue_plan.json" \
-  --anchor-contract "$VIDEO_META/visual_anchor_contract.json" \
-  --timeline "$VIDEO_META/timeline.json" \
-  --rate-plan "$VIDEO_AUDIO/tts_rate_plan.json" \
-  --target-minutes 3 \
-  --strict \
-  --strict-attention \
-  --require-visual-cues \
-  --require-cue-plan \
-  --require-anchor-contract \
-  --require-pptx-anchors \
-  --require-timeline \
-  --require-rate-plan \
-  --require-subtitles \
-  --require-word-timings \
-  --out "$VIDEO_META/reports/video_qa_report.json"
-```
-
-The gate must pass before delivery. If it fails, fix the deck/script/audio/cues
-and re-render; do not bypass strict mode for final output. Only pass
-`--allow-missing-attention` for an explicitly user-approved degraded/debug run
-with no highlight.
-
-`audio_extra_files` remains visible in the QA report but is non-blocking: an
-unreferenced MP3 does not change `script.json`, the timeline, or either final
-MP4. Every other warning remains blocking under `--strict` or
-`--fail-on-warning`, and every error is always blocking.
-
-Write `$VIDEO_OUT/manifest.json` with `"layout": "v2-assets"` and root-relative
-paths for both MP4 deliverables plus `assets/audio/`, `assets/captions/`,
-`assets/slides/`, `assets/clips/`, and `assets/meta/reports/video_qa_report.json`.
-If the QA gate exits non-zero, stop and fix the video package. Do not continue
-with a simplified or unverified video unless the user explicitly approves a
-named degraded path.
-
-## Audio Providers
-
-The current shared synthesizer is:
-
-```bash
-python skills/paper2poster/scripts/generate_audio.py <script.json> --outdir <audio_dir>
-```
-
-It consumes JSON with the same section contract used by
-`paper2assets`'s `assets/meta/narration.json` and by paper2poster's Listen buttons:
-
-```json
-{
-  "provider": "edge",
-  "voice": null,
   "sections": [
-    {"id": "problem", "heading": "Problem", "text": "..."}
+    {"id": "problem", "heading": "Problem", "text": "..."},
+    {"id": "method", "heading": "Method", "text": "..."}
   ]
 }
 ```
 
-`paper2assets` owns the narration text only. It does not synthesize audio.
-`paper2poster/scripts/generate_audio.py` is the shared synthesizer:
+`assets/meta/narration.json` from paper2assets already has this
+`{"id", "heading", "text"}` shape; it can be used directly as the
+`--script-json` input in Step 5 provided its section count matches the PPTX
+slide count. The number of sections in this file must equal the number of
+slides in the deck exported in Step 3, in the same order; pptx2video rejects a
+section-count mismatch. When ppt-master's page-count resolution produced a
+different number of slides than `narration.json` has sections, reconcile the
+two before rendering: either regenerate the deck at the corrected page count,
+or edit the `script.json` copy so its section count and order match the
+delivered PPTX exactly. Do not truncate or duplicate sections to force a
+match.
 
-- `edge` is the default free backend (`edge-tts`, no API key; default voice
-  `en-US-AndrewNeural`).
-- `azure` is opt-in and requires the Azure config/API key expected by
-  paper2poster's script; Azure voices are `alloy`, `echo`, `fable`, `onyx`,
-  `nova`, `shimmer`.
+Passing this same file as `--ids-from-script` in Step 5 also fixes each
+slide's internal `section_id` to this file's `sections[*].id` order, so
+pptx2video's own section-id validation is satisfied automatically; do not
+build a separate id-mapping file.
 
-The compositor does not care which provider produced the MP3s. Future provider
-support (edge-tts, OpenAI TTS, ElevenLabs, etc.) should only guarantee the same
-contract: one `<id>.mp3` per script section under the chosen `audio/` directory.
+## Step 5: Render through pptx2video, passing the same resolved trigger
 
-When strict visual-attention alignment is required and Edge TTS is acceptable,
-use the bundled Edge helper because it can write word-boundary timings:
-
-```bash
-python -m pptx2video.generate_edge_audio \
-  <project_path>/audio/script.json \
-  --outdir <project_path>/audio \
-  --timings-out <project_path>/audio/word_timings.json
-```
-
-Those timings let `generate_visual_cues.py --require-timestamps` and
-`python -m pptx2video.check_video_package --require-word-timings` reject highlight plans that only
-use proportional/estimated timing.
-
-## Duration Control
-
-Use the duration target at script-generation time, before TTS:
+Render into a fresh output directory; it must not already exist.
 
 ```bash
-python skills/paper2video/scripts/notes_to_script.py <project_path> \
-  --target-minutes 3 \
-  --duration-tolerance-seconds 30 \
-  --out <project_path>/audio/script.json
+PPTX2VIDEO_TMP=$(mktemp -d)/video-bundle
+python3 -m pptx2video render \
+  "<project_path>/exports/<name>.pptx" \
+  "$PPTX2VIDEO_TMP" \
+  --resolution 1080p \
+  --script-json "$VIDEO_AUDIO/script.json" \
+  --ids-from-script "$VIDEO_AUDIO/script.json" \
+  --animation-order-policy animation-pane \
+  --click-group-policy <pptx2video_click_group_policy from Step 2>
 ```
 
-or for paper2assets:
+- `--click-group-policy` must be the exact value Step 2 resolved
+  (`normalize` for `on-click`, `preserve` for `after-previous`). Never omit
+  this flag and rely on pptx2video's own CLI default; the CLI default
+  (`normalize`) silently overwrites a deliberately authored `after-previous`
+  cascade into a click-driven deck, which is the opposite of what an explicit
+  `after-previous` request means.
+- `--animation-order-policy animation-pane` makes the run fully
+  non-interactive and deterministic. pptx2video's own `auto` default only
+  prompts when `stdin` is a TTY; in a non-interactive agent session with an
+  actual ordering conflict it exits 3 without rendering. Passing
+  `animation-pane` explicitly confirms "trust the deck's own Animation Pane
+  order" up front so a real conflict never stalls the run silently.
+- Do not pass `--no-subtitles` unless the user explicitly disabled captions;
+  the default burns captions into `video.mp4` while leaving
+  `video_no_subtitles.mp4` and the VTT/SRT sidecars intact.
+- Do not pass `--baseline-pptx` / `--narration-mode regenerate` for a first
+  render; those are for an explicit re-render of a previously delivered deck.
+
+**Do not add `--no-qa`.** It does not exist on the top-level `pptx2video
+render` CLI; QA is unconditionally enforced by `cli.py`'s own `_render()`,
+which reads `assets/meta/reports/video_qa_report.json` after rendering and
+raises `SystemExit` unless `passed` is true with zero errors and zero
+warnings. A non-zero exit here is a blocking failure: fix the deck, script, or
+flags and rerun this exact command; do not fall back to a private render path
+to force a result through.
+
+On success, promote the fresh bundle into `<video_outdir>` without clobbering
+an existing `manifest.json` from a different paper2* skill sharing the same
+bundle root:
 
 ```bash
-python skills/paper2video/scripts/assets_to_script.py "$PAPER_ASSETS" \
-  --target-minutes 3 \
-  --duration-tolerance-seconds 30 \
-  --out "$VIDEO_AUDIO/script.json" \
-  --notes-dir "$VIDEO_META/notes" \
-  --duration-plan-out "$VIDEO_META/duration_plan.json"
+rsync -a --exclude=manifest.json "$PPTX2VIDEO_TMP"/ "$VIDEO_OUT"/
 ```
 
-The helper estimates TTS duration from word count and keeps the selected section
-count by default. If the estimate is outside tolerance, it writes a
-`duration_rewrite_request.json` with per-section target word budgets. The agent
-must rewrite the whole narration for those sections, preserving all key ideas
-within the budget, then rerun with `--duration-rewrite-in`. Pass
-`--duration-section-mode auto` only when the deck can be regenerated to match a
-shorter section list; existing PPTX decks should keep the default `keep` mode.
-`--allow-extractive-duration-draft` is for experiments only and must not be used
-for final deliverables.
+If `$VIDEO_OUT/manifest.json` already exists (written by `paper2assets`,
+`paper2poster`, or `paper2blog` sharing the same bundle root), merge
+`$PPTX2VIDEO_TMP/manifest.json`'s video-specific fields into it by hand
+instead of overwriting; do not let a blind copy erase fields another
+paper2* skill wrote to the same `manifest.json`. Otherwise, copy pptx2video's
+`manifest.json` in as-is.
 
-Then pass the same target to `python -m pptx2video.render_video`. Rendering writes
-`<out_stem>_duration_report.json` with the real MP4 duration after audio exists.
-Use that measured duration to produce a conservative TTS rate plan:
+## Step 6: Audit the final PPTX against the resolved trigger (MANDATORY gate)
+
+This closes the loop the old protocol never checked: prove the delivered
+`video.pptx`'s native `p:timing` tree actually carries the trigger this skill
+resolved in Step 2, rather than trusting that ppt-master's flag and
+pptx2video's flag each did the right thing.
 
 ```bash
-python skills/paper2video/scripts/plan_tts_rate.py \
-  --duration-plan <project_path>/audio/duration_plan.json \
-  --duration-report <project_path>/exports/video_duration_report.json \
-  --target-minutes 3 \
-  --out <project_path>/audio/tts_rate_plan.json
+python3 skills/paper2video/scripts/ppt_stage_validator.py audit-final-pptx-trigger \
+  "$VIDEO_OUT/video.pptx" \
+  --ppt-trigger <ppt_trigger from Step 2>
 ```
 
-Only `within_tolerance`, `use_rate_adjustment`, or
-`borderline_rate_adjustment` may be used for final generation. A
-`needs_script_rewrite` plan is a hard instruction for the agent to go back to
-`notes_to_script.py` or `assets_to_script.py`, generate/apply a semantic
-duration rewrite, and then regenerate TTS, subtitles, video, and timeline. Do
-not hide a large mismatch with speech-rate changes.
+- `on-click` requires every non-With-Previous native row to be `clickEffect`;
+  this is what gives a downloaded PPTX a continuous `1..N` Animation Pane
+  badge sequence.
+- `after-previous` requires every non-With-Previous native row, including
+  every row inside a preserved cascade, to be `afterEffect`; this is what
+  makes the PPTX auto-play natively in PowerPoint. No numbered Pane is
+  claimed or required for this choice.
+- The audit raises if the delivered deck has no native `p:timing` animation
+  on any slide at all, so a silently-dropped animation request fails loudly
+  instead of passing by vacuity.
 
-## Visual Attention Cues
+A non-zero exit here is a blocking failure, exactly like a failed
+`video_qa_report.json` in Step 5: it means ppt-master's `--animation-trigger`
+and pptx2video's `--click-group-policy` disagreed about the trigger, or one
+of them fell back to its own default instead of the value resolved in Step 2.
+Re-check the flags actually passed in Step 3 and Step 5 against Step 2's
+printed JSON, fix whichever command diverged, and re-render before reporting
+the video as done.
 
-To make static slides feel less inert, first create an explicit visual-anchor
-contract from the final narration script. Give the Markdown to ppt-master while
-authoring the deck so it labels the few key visual targets used by the video:
+## Step 7: Report
 
-```bash
-python skills/paper2video/scripts/generate_cue_requirements.py \
-  <project_path>/audio/script.json \
-  --out <project_path>/cue_requirements.json \
-  --contract-out <project_path>/visual_anchor_contract.json \
-  --markdown-out <project_path>/cue_requirements.md
+Tell the user the absolute paths of the deliverables:
+
+- `<video_outdir>/video.mp4` (burned-in subtitles)
+- `<video_outdir>/video_no_subtitles.mp4` (paper2reel source)
+- `<video_outdir>/video.pptx` (editable deck, the same file the Step 6 audit
+  verified)
+- `<video_outdir>/assets/meta/timeline.json` and
+  `<video_outdir>/assets/meta/reports/video_qa_report.json`
+
+State explicitly which `ppt_trigger` was used and confirm Step 6's audit
+passed. Do not report the task done without having run and passed both
+Step 5's QA gate and Step 6's trigger audit.
+
+## Acceptance criteria
+
+- Downloaded PPTX Animation Pane shows a continuous `1..N` badge sequence
+  when `ppt_trigger=on-click` was resolved and used.
+- The rendered video auto-plays every phase in an order that matches the
+  spoken narration, regardless of which `ppt_trigger` was used.
+- When the user explicitly requested `after-previous`, the delivered PPTX
+  still auto-plays natively in PowerPoint, without a claim of continuous
+  native numbering.
+- `ppt_stage_validator.py audit-final-pptx-trigger` exits 0 against the exact
+  `ppt_trigger` resolved in Step 2.
+- `pptx2video render`'s own QA gate (`video_qa_report.json`) passed with zero
+  errors and zero warnings.
+
+## Key rules
+
+- One route only. Every render goes through `/pptx2video` or the exact
+  `pptx2video render` CLI command in Step 5; never a private
+  `pptx2video.<module>` import, never a hand-rolled narration/timeline/QA
+  substitute.
+- One trigger decision. Step 2 resolves `ppt_trigger` exactly once per run;
+  Step 3 and Step 5 both consume that same resolved JSON, never their own
+  child-skill default.
+- QA gate passing is not the finish line by itself. A passing
+  `video_qa_report.json` proves pptx2video's own render was clean; it does
+  not prove the trigger handoff held. Step 6's audit is the check that
+  proves that, and it is mandatory before reporting completion.
+- Do not degrade silently. A missing dependency, a blocked ppt-master
+  confirmation gate, a failed QA report, or a failed trigger audit are all
+  stop-and-fix conditions, never a reason to ship a simplified or unverified
+  video.
+
+## Tools
+
+```
+scripts/
+├── ppt_options_contract.py   # resolve-ppt-trigger CLI; also the shared PPT option/appearance contract
+└── ppt_stage_validator.py    # audit-final-pptx-trigger CLI; also descriptive-option/export-flag audits
 ```
 
-ppt-master should write each `anchor_id` into the corresponding visible SVG and
-PPTX element metadata: SVG `id`, `data-cue-label`, `<title>`, or `<desc>`, and
-PPTX shape name, alt-text title, or alt-text description. SVG anchors remain
-useful semantic labels, but final highlighted videos should prefer PPTX
-geometry when it can be matched confidently. The cue generator records both:
-`semantic_*` fields describe what narration target was selected, while
-`geometry_*` fields describe the PPTX element or PPTX connected cluster whose
-box is actually rendered.
-
-Then build the cue plan from the deck, slide visuals, narration, word-boundary
-timings, and the anchor contract. Use a two-pass flow when the deck was authored
-through SVG: the first pass reads the SVG anchor boxes, `inject_pptx_anchors.py`
-stores those boxes as invisible PPTX shapes with matching shape metadata, and
-the second pass proves the editable PPTX carries the same semantic anchors.
-
-```bash
-python skills/paper2video/scripts/generate_visual_cues.py <project_path> \
-  --script-json <project_path>/audio/script.json \
-  --audio-dir <project_path>/audio \
-  --pptx <project_path>/exports/<name>.pptx \
-  --anchor-contract <project_path>/visual_anchor_contract.json \
-  --timings-json <project_path>/audio/word_timings.json \
-  --strict-gate \
-  --require-timestamps \
-  --out <project_path>/visual_cues.pre_pptx.json \
-  --geometry-report-out <project_path>/geometry_resolution.pre_pptx.json \
-  --candidate-review-out <project_path>/cue_candidate_review.pre_pptx.html \
-  --cue-plan-out <project_path>/visual_cue_plan.pre_pptx.json \
-  --audit-out <project_path>/cue_audit.pre_pptx.json \
-  --html-audit-out <project_path>/cue_audit.pre_pptx.html \
-  --repair-out <project_path>/cue_repair_requests.pre_pptx.json \
-  --repair-md-out <project_path>/cue_repair_requests.pre_pptx.md
-
-python skills/paper2video/scripts/inject_pptx_anchors.py \
-  --pptx <project_path>/exports/<name>.pptx \
-  --cue-plan <project_path>/visual_cue_plan.pre_pptx.json \
-  --out <project_path>/exports/<name>.pptx \
-  --report <project_path>/pptx_anchor_injection.json
-
-python skills/paper2video/scripts/generate_visual_cues.py <project_path> \
-  --script-json <project_path>/audio/script.json \
-  --audio-dir <project_path>/audio \
-  --pptx <project_path>/exports/<name>.pptx \
-  --anchor-contract <project_path>/visual_anchor_contract.json \
-  --require-pptx-anchors \
-  --timings-json <project_path>/audio/word_timings.json \
-  --strict-gate \
-  --require-timestamps \
-  --out <project_path>/visual_cues.json \
-  --geometry-report-out <project_path>/geometry_resolution.json \
-  --candidate-review-out <project_path>/cue_candidate_review.html \
-  --cue-plan-out <project_path>/visual_cue_plan.json \
-  --audit-out <project_path>/cue_audit.json \
-  --html-audit-out <project_path>/cue_audit.html \
-  --repair-out <project_path>/cue_repair_requests.json \
-  --repair-md-out <project_path>/cue_repair_requests.md
-```
-
-Then pass positioned cues at render time:
-
-```bash
-python -m pptx2video.render_video <project_path> \
-  --pptx <project_path>/exports/<name>.pptx \
-  --audio-dir <project_path>/audio \
-  --script-json <project_path>/audio/script.json \
-  --attention-mode highlight \
-  --highlight-style spotlight_laser \
-  --visual-cues <project_path>/visual_cues.json \
-  --duration-report-out "$VIDEO_META/video_duration_report.json" \
-  --out "$VIDEO_CLIPS/video_raw.mp4"
-```
-
-`highlight` is the default final-delivery mode. If `--attention-mode` is not
-`none`, `python -m pptx2video.render_video` requires `--visual-cues`; missing cues are a
-blocking error unless the agent explicitly passes the degraded/debug-only
-`--allow-missing-visual-cues`.
-
-`visual_cues.json` uses normalized coordinates so it survives 720p/1080p/4K
-renders:
-
-```json
-{
-  "slides": [
-    {
-      "id": "07_fineweb_accuracy_lift",
-      "cues": [
-        {"start": 3.2, "end": 8.5, "type": "highlight", "box": [0.12, 0.28, 0.14, 0.21], "point": [0.19, 0.39]},
-        {"start": 9.0, "duration": 4.0, "type": "cursor", "point": [0.52, 0.62]}
-      ]
-    }
-  ]
-}
-```
-
-`id` matches the audio/script section id. `index` may be used instead for
-1-based slide numbers. `highlight` renders a translucent target box when a
-normalized `box` is available; `point` remains as a compatibility center point
-and point-only cues render as the older soft-dot fallback. For automatic cue
-generation, the matcher reads semantic SVG/PPT regions and strongly prefers
-explicit `cue_` anchors. It then resolves the visible geometry to PPTX when
-possible: direct PPTX boxes first, small connected PPTX clusters second, and
-semantic fallback only when PPTX geometry is low-confidence. Text-line targets
-are promoted to their nearby module/group when that parent is still reasonably
-bounded, so final highlights should point at cards, rows, formula blocks, or
-figure panels rather than isolated words. Connected PPTX clusters are rejected
-when the union box grows too large or crosses unrelated PPTX content. When
-`--anchor-contract` is provided, anchors are no longer just a confidence bonus:
-each contracted narration chunk must match its exact `anchor_id`, and
-`--require-pptx-anchors` requires the match to come from PPTX geometry.
-
-`generate_visual_cues.py` also writes `geometry_resolution.json`. Use it with
-`cue_audit.html` and `cue_candidate_review.html` to inspect whether a cue
-rendered from `pptx`, `pptx_cluster`, or a semantic fallback. The candidate
-review page shows the narration chunk, word-timing match, selected semantic
-target, final geometry target, and top rejected semantic/geometry alternatives.
-`python -m pptx2video.check_video_package --strict` reports geometry source counts and timing
-source counts; it fails if `geometry_box` is malformed, does not match the
-rendered cue `box`, lies outside the normalized slide canvas, or if required
-word-timing alignment is low-confidence.
-
-Highlight presentation styles:
-
-- `spotlight_laser` is the production default: a feathered spotlight plus a
-  small red laser-pointer dot at the accepted cue center.
-- `box` renders a subtle slate fill plus border around the accepted box.
-- `cursor` renders only a soft presentation pointer at the cue center.
-- `box_cursor` combines the accepted box with the same pointer, useful for
-  reviewer comparisons.
-- `spotlight_cursor` combines the feathered spotlight with the same mouse
-  pointer, useful when a visible arrow is preferred over the laser dot.
-- `laser` renders only the small red laser-pointer dot at the cue center.
-- Cursor styles render a mouse-pointer overlay and ease it between consecutive
-  cue points on the same slide instead of teleporting at cue boundaries.
-- Laser styles use the same eased movement between consecutive cue points as
-  cursor styles.
-- `spotlight`, `spotlight_cursor`, and `spotlight_laser` softly dim the
-  surrounding slide with a continuous alpha-mask falloff around the accepted
-  box while keeping the target at original brightness. They are tolerance modes
-  and can be substantially slower on full-length videos because each cue adds
-  an extra full-frame overlay mask.
-
-Strict gate repair loop:
-
-1. If `generate_visual_cues.py --strict-gate` exits non-zero, do not render a
-   highlighted video yet.
-2. Treat `cue_repair_requests.md`, `cue_audit.html`, `visual_cue_plan.json`,
-   and `slide_regions.json` as agent debugging inputs, not user homework.
-3. Open those files and fix the root cause in the deck or narration: add precise SVG cue labels,
-   make a huge container into a smaller semantic group, retarget away from
-   header/caption/chrome, or rewrite/split a narration chunk so it names the
-   same concept as the slide. If the failure says `anchor_missing`, add the
-   requested `anchor_id` to the intended PPTX shape metadata and rerun export.
-4. Re-run ppt-master post-processing/export when SVGs changed, rerun the
-   pre-PPTX cue pass, rerun `inject_pptx_anchors.py`, then rerun
-   `generate_visual_cues.py --strict-gate --require-pptx-anchors`.
-5. Attempt at least two concrete repair passes before reporting a blocking
-   visual-cue ERROR, unless the failure is a missing dependency or a user
-   decision is required.
-6. While repairing, record a `REPAIRING` note in `$VIDEO_OUT/manifest.json` or
-   `$VIDEO_META/reports/video_qa_report.json`; promote to final `ERROR` only
-   after the agent has no viable repair path or needs user/external action.
-
-`generate_visual_cues.py` writes the audit and repair files even when strict
-mode fails, then exits non-zero. That is intentional: diagnostics exist for
-repair, while downstream rendering is still blocked until the gate passes.
-
-After a highlighted render, run `python -m pptx2video.build_timeline` with the same
-`visual_cue_plan.json`, `visual_cues.json`, `duration_report.json`, script, and
-subtitle VTT. This is what binds every spoken chunk to its audio time, subtitle
-cue, and visual target. Do not let downstream tools cut video by ad-hoc
-timestamps that are not derived from the timeline.
-
-For section-level playback in paper2reel, build section media from
-complete slide clips and append a short silent freeze tail. This avoids abrupt
-audio/video endings and avoids cutting a slide mid-sentence simply because the
-section boundary falls inside a rendered MP4 timestamp. Use
-`$VIDEO_OUT/video_no_subtitles.mp4` as the paper2reel video source, not
-the burned-in subtitle deliverable at `$VIDEO_OUT/video.mp4`; otherwise
-the viewer can show duplicate subtitles when CC is enabled.
-
-## Subtitles
-
-`python -m pptx2video.add_subtitles` can use either notes files or script JSON:
-
-- With `--script-json`, subtitle order and fallback text come from the JSON.
-- Without it, the script preserves legacy ppt-master behavior: sorted
-  `notes/*.md` paired with sorted `audio/*.mp3`.
-
-Default mode preserves the complete slide above an appended solid black bottom
-band and burns white captions inside that reserved band. Pass
-`--subtitle-overlay` to keep the original frame size and place captions over
-slide pixels; overlay mode uses a translucent dark box by default, and
-`--no-subtitle-box` removes that background. Pass `--soft` to mux a toggleable
-`mov_text` track instead. Pass `--srt-only` to produce just the SRT.
-Pass `--no-subtitles` to keep the public MP4 caption-free while still writing
-the SRT/VTT timing sidecars required by the internal timeline and QA.
-
-## Sanity Checks
-
-Before calling the video done:
-
-- PPTX slide count equals the number of selected script sections.
-- Every selected section has `audio/<id>.mp3`.
-- `python -m pptx2video.render_video --audio-only-check` passes.
-- `ffprobe` reports a positive duration for the final MP4.
-- `python -m pptx2video.check_video_package --strict` passes and writes
-  `video_qa_report.json`.
-- If visual attention is enabled,
-  `python -m pptx2video.check_video_package --strict-attention`
-  passes with `--require-visual-cues --require-cue-plan --require-timeline
-  --require-word-timings`.
-- `timeline.json` exists and every chunk has the expected audio window,
-  subtitle cues, and accepted visual cue before paper2reel consumes it.
-- If subtitles are requested, `python -m pptx2video.add_subtitles` uses the same
-  `--start-pad`, `--pad-tail`, and `--script-json` as
-  `python -m pptx2video.render_video`.
+The generic render runtime is not owned or vendored by this skill. Install
+`pptx2video` and invoke it only through `/pptx2video` or
+`python3 -m pptx2video {doctor,render,bootstrap}`.
 
 ## References
 
-- `references/script_json_schema.md` - narration JSON shape and TTS gotchas.
-- `references/visual_cues.md` - paper-specific cue planning and anchor bridge.
-- `references/pptx2video.md` - minimal bridge to the standalone PPTX renderer.
+- `references/pptx2video.md` - the standalone renderer's install steps, the
+  exact CLI flags this skill's Step 5 command relies on, and the pitfalls
+  (PATH, `--no-qa` not existing, click-group-policy defaults) that make an
+  almost-right invocation silently diverge from the protocol.
+- `references/script_json_schema.md` - the `script.json` schema Step 4
+  builds and Step 5 passes as `--script-json` / `--ids-from-script`,
+  including the handle-level `elements` form and TTS text gotchas.
+- `references/ppt_trigger_handoff.md` - deep dive on the four-concept model,
+  the native OOXML mechanics behind it, and the failure modes this skill's
+  Step 2/Step 6 close.

@@ -1,135 +1,107 @@
-# Narration script JSON — schema and gotchas
+# script.json - schema, authority, and gotchas
 
-paper2poster's `scripts/generate_audio.py` reads a single JSON file and writes
-one MP3 per `sections[*].id`. paper2video reuses it verbatim. The same shape is
-also produced from paper2assets by
-`skills/paper2video/scripts/assets_to_script.py`. The script JSON shape:
+`script.json` is the narration authority Step 4 of `SKILL.md` builds from the
+shared `assets/meta/narration.json`, and it is what Step 5 passes as both
+`--script-json` and `--ids-from-script` to `python3 -m pptx2video render`.
+This file describes exactly what pptx2video reads from it
+(`apply_user_script()` in the installed `pptx2video` package), not a
+narration format this skill invents on its own.
+
+## Minimal shape (section-level narration)
 
 ```json
 {
-  "voice": "alloy",          // optional; overrides cfg default. OpenAI TTS voices only.
-  "model": "tts",            // optional; usually leave at "tts".
   "sections": [
-    {"id": "01-intro",     "heading": "Introduction",   "text": "Welcome..."},
-    {"id": "02-method",    "heading": "Method",         "text": "We propose..."},
-    ...
+    {"id": "problem", "heading": "Problem", "text": "Prior work assumes..."},
+    {"id": "method",  "heading": "Method",  "text": "We propose a two-stage..."}
   ]
 }
 ```
 
-## What each field does
+`assets/meta/narration.json` produced by `paper2assets` already has this
+exact `{"id", "heading", "text"}` shape per section, so it can be used
+directly as this file, provided its section count matches the deck's slide
+count (see "Section count and order must match the PPTX" below).
 
-- **voice** — one of `alloy / echo / fable / onyx / nova / shimmer`. Anything
-  else (e.g. an Azure Neural name like `en-US-JennyNeural`) makes the API
-  return HTTP 400. If the user wants a Neural-style voice, use ppt-master's
-  `notes_to_audio.py` instead — paper2poster's path is OpenAI-TTS only.
-- **model** — defaults to `tts`. Don't set it unless the user asked for a
-  specific Azure deployment.
-- **sections[*].id** — also the output filename (`audio/<id>.mp3`). For
-  ppt-master projects, this is usually the slide stem (`01-intro`). For
-  paper2assets, this is the semantic section id (`problem`, `key-result`).
-  In both cases, pass the JSON to
-  `python -m pptx2video.render_video --script-json` so frame and
-  audio pairing follows `sections` order instead of alphabetical filename
-  order.
-- **sections[*].heading** — only used in `manifest.json`. Cosmetic.
-- **sections[*].text** — what gets spoken. Plain text only — markdown
-  syntax (`**bold**`, `` `code` ``, list bullets) is read literally by the
-  TTS, which sounds robotic. `notes_to_script.py` strips markdown before
-  emitting the JSON; if you assemble the JSON by hand, do the same.
+## What pptx2video actually reads from this file
 
-## Gotchas
+- **`sections` (required, top-level, must be a non-empty list).** Every other
+  top-level key is ignored by `apply_user_script()`. A stray `voice`, `model`,
+  or `edge_voice` key at the top level does nothing; TTS voice selection is a
+  `pptx2video render --voice` CLI flag, not a `script.json` field. Do not
+  carry over legacy OpenAI-TTS-style `voice: "alloy"` fields from an older
+  version of this document; they have no effect on the render.
+- **`sections[*].id` (required, string, one per PPTX slide, in slide order).**
+  Must equal that slide's `section_id` exactly, or pptx2video raises. Passing
+  the same file as both `--ids-from-script` and `--script-json` (as Step 5
+  does) makes this automatic: `--ids-from-script` assigns each slide's
+  `section_id` from this file's `id` list first, then `--script-json`'s own
+  id check compares against the id it just assigned, so the two can never
+  disagree. Do not build a separate id-mapping file for this.
+- **`sections[*].heading`.** Cosmetic; used only in the assembled report
+  metadata. Not spoken.
+- **`sections[*].text`.** The spoken narration for the whole slide. Plain
+  text; do not include markdown syntax (`**bold**`, `` `code` ``, list
+  bullets) or literal code, since Edge TTS reads that syntax literally rather
+  than rendering it, and speaking a code block aloud is rarely useful.
+  Ending a section with sentence-final punctuation gives the TTS engine a
+  natural prosodic drop instead of a flat trail-off.
+- **`sections[*].elements` (optional, replaces `text` for that section when
+  present).** For precise per-shape timing, address individual top-level
+  shapes by their stable handle instead of narrating the whole slide as one
+  block:
 
-- **End each section with sentence-final punctuation.** The TTS engine uses
-  punctuation to cue prosody and pause. A section ending with "we propose
-  the following approach" trails off in a flat tone; "we propose the
-  following approach." gets the natural drop. `notes_to_script.py` doesn't
-  fix this — keep it in mind if you hand-edit text.
-- **Don't include code blocks.** Synthesizing literal Python or shell is
-  almost always worse than just describing what the code does. The helper
-  drops fenced code blocks; if you're hand-writing text, paraphrase code
-  rather than spelling it out.
-- **One section ~= one slide ~= one MP3.** Don't try to merge multiple slides
-  into one section to save TTS calls — Stage 3's frame/audio pairing
-  assumes 1-to-1.
-- **Skipped slides are fine for divider/title slides** with no narration.
+  ```json
+  {
+    "sections": [
+      {
+        "id": "results",
+        "elements": [
+          {
+            "handle": "latency-card",
+            "script": "The card appears. [[Spotlight] Notice the lower latency.]"
+          }
+        ]
+      }
+    ]
+  }
+  ```
 
-## Duration planning sidecar
+  `handle` must match a handle pptx2video's protocol extraction already
+  assigned to a top-level shape or group on that slide (inspect the deck's
+  Notes/Alt Text or a prior render's `timeline.json` to find valid handles).
+  `script` is spoken text that may contain at most the `Spotlight` marker;
+  `[[Spotlight]]` places a supplemental emphasis cue at that point in the
+  narration, and `[[Spotlight] scope text]` additionally marks which spoken
+  span the spotlight covers. No other marker name is accepted in a
+  user-supplied script; native entrance/exit animation timing comes from the
+  PPTX's own `p:timing` tree (see `references/ppt_trigger_handoff.md`), not
+  from a script marker.
 
-When `notes_to_script.py` or `assets_to_script.py` is called with
-`--target-minutes`, it still writes the same TTS-compatible `script.json`.
-It also writes a sidecar `duration_plan.json`:
+## Section count and order must match the PPTX
 
-```json
-{
-  "schema_version": "paper2video_duration_plan.v1",
-  "target_seconds": 180.0,
-  "tolerance_seconds": 30.0,
-  "status": "within_tolerance",
-  "estimated_video_seconds": 192.4,
-  "sections": [
-    {
-      "id": "method",
-      "source_words": 82,
-      "budget_words": 44,
-      "planned_words": 41,
-      "changed": true,
-      "dropped": false
-    }
-  ]
-}
-```
+The number of `sections` entries must equal the number of slides in the PPTX
+Step 3 (ppt-master) exported, in the same order; pptx2video rejects a
+mismatch outright. When ppt-master's page-count resolution produced a
+different slide count than `narration.json` has sections, reconcile before
+rendering: either regenerate the deck at the corrected page count, or edit
+the `script.json` copy so its section count and order match the delivered
+PPTX exactly. Do not truncate or duplicate sections to force a match.
 
-This sidecar is metadata only. `generate_audio.py` should consume `script.json`,
-not `duration_plan.json`. After TTS,
-`python -m pptx2video.render_video --target-minutes` writes a
-real `duration_report.json` based on probed MP3/MP4 duration.
-  `notes_to_script.py --min-chars` filters them out automatically. Just
-  remember the resulting MP4 will also skip those slides — if a divider
-  needs a few seconds of screentime, give it a real one-line note.
+## Where the audio actually comes from
 
-## Worked example
+`pptx2video render` synthesizes every narration MP3 itself, automatically,
+using Edge TTS (free, no API key). It does not read pre-rendered audio from
+`script.json`, and this skill does not call any separate audio-generation
+script before Step 5. See `references/pptx2video.md` for the `--voice` and
+`--rate` flags that control that synthesis.
 
-ppt-master output (excerpt):
+## Divergence from paper2poster's `generate_audio.py` contract
 
-```
-projects/llama_paper_ppt169_20260607/
-├── notes/
-│   ├── 01-title.md          ("# LLaMA: Open and Efficient ...")
-│   ├── 02-motivation.md
-│   ├── 03-method.md
-│   └── 04-results.md
-└── ...
-```
-
-After `notes_to_script.py`:
-
-```json
-{
-  "voice": "alloy",
-  "model": "tts",
-  "sections": [
-    {"id": "01-title",      "heading": "LLaMA: Open and Efficient ...", "text": "..."},
-    {"id": "02-motivation", "heading": "Motivation",                    "text": "..."},
-    {"id": "03-method",     "heading": "Method",                        "text": "..."},
-    {"id": "04-results",    "heading": "Results",                       "text": "..."}
-  ]
-}
-```
-
-After `generate_audio.py`:
-
-```
-audio/
-├── 01-title.mp3
-├── 02-motivation.mp3
-├── 03-method.mp3
-├── 04-results.mp3
-├── manifest.json
-└── script.json
-```
-
-`python -m pptx2video.render_video` then reads the PPTX (4 slides) and audio dir
-(4 MP3s) and
-muxes them in sorted order. PNGs are named `slide-01.png … slide-04.png`
-inside the temp dir; matching is positional, not by stem.
+An earlier version of this file described paper2poster's OpenAI-TTS
+`generate_audio.py` script JSON (`voice: alloy/echo/fable/onyx/nova/shimmer`,
+one MP3 per section written by hand). That is a different tool with a
+different contract; `paper2video` does not call `generate_audio.py` and does
+not pre-synthesize audio at all. If a user wants poster-style OpenAI TTS
+audio for some other purpose, that is `paper2poster`'s own
+`scripts/generate_audio.py`, documented in that skill, not this one.

@@ -7,11 +7,13 @@ same schema; every enumerable field is closed over the catalog below.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
 import random
 import re
+import sys
 from collections.abc import Mapping
 
 
@@ -167,6 +169,25 @@ PPT_MASTER_FORMULA_POLICIES = _ids("formula_policies")
 PPT_MASTER_TRANSITIONS = _ids("transitions")
 PPT_MASTER_ANIMATIONS = _ids("animations")
 PPT_MASTER_ANIMATION_TRIGGERS = _ids("animation_triggers")
+
+# Paper2Video's single user-facing native-animation trigger intent. This is
+# the only place a trigger decision may be made; ppt-master and pptx2video
+# must not each resolve it independently with their own default. `with
+# -previous` is a lower-level ppt-master simultaneous-reveal flag that stays
+# outside this handoff contract because it has no click-group or narration-
+# order ambiguity to resolve.
+PPT_TRIGGER_HANDOFF_VALUES = tuple(
+    value for value in PPT_MASTER_ANIMATION_TRIGGERS if value != "with-previous"
+)
+PPT_TRIGGER_DEFAULT = "on-click"
+
+# pptx2video's --click-group-policy enum, bound 1:1 to PPT_TRIGGER_HANDOFF_VALUES
+# so paper2video never lets the two child skills pick divergent defaults.
+PPTX2VIDEO_CLICK_GROUP_POLICIES = ("normalize", "preserve")
+PPT_TRIGGER_TO_CLICK_GROUP_POLICY = {
+    "on-click": "normalize",
+    "after-previous": "preserve",
+}
 
 _CONCRETE_MODES = tuple(value for value in PPT_MASTER_MODES if value != "auto")
 _CONCRETE_VISUAL_STYLES = tuple(
@@ -332,15 +353,69 @@ def resolve_auto_ppt_appearance(
     return resolver_request, appearance_lock
 
 
+def resolve_ppt_trigger_handoff(requested: Mapping[str, object]) -> dict:
+    """Resolve one explicit `ppt_trigger` intent into every downstream flag.
+
+    Paper2Video owns this single decision point so ppt-master and pptx2video
+    never independently default to a disagreeing native-animation trigger.
+    `ppt_trigger` selects both the native `p:cTn/@nodeType` ppt-master writes
+    when authoring the deck (`--animation-trigger`) and the pptx2video
+    `--click-group-policy` used when rendering it:
+
+    - `on-click` (default) asks ppt-master to author click-driven entrance
+      effects and asks pptx2video to `normalize` every sequential Animation
+      Pane phase into its own numbered top-level click group. A downloaded
+      PPTX then shows a continuous `1..N` badge sequence in the native
+      Animation Pane. The rendered MP4 still auto-plays with no manual click:
+      pptx2video schedules playback from `effect_order` (native Pane row
+      order) and narration/word timing, never from the stored trigger type.
+    - `after-previous` asks ppt-master to author a click-free cascade and
+      asks pptx2video to `preserve` that source `mainSeq` topology, honoring
+      an explicit user request for a PPTX that also auto-plays natively in
+      PowerPoint. `preserve` intentionally leaves click-group numbering as
+      PowerPoint computes it for automatic effects (commonly all `0`); do not
+      claim a numbered Animation Pane for this choice.
+
+    Raises `PptOptionsValidationError` for any value outside
+    `PPT_TRIGGER_HANDOFF_VALUES` (plus the `auto` alias for the default).
+    """
+    requested_value = str(requested.get("ppt_trigger") or "").strip().lower()
+    if requested_value in ("", "auto"):
+        ppt_trigger = PPT_TRIGGER_DEFAULT
+    elif requested_value in PPT_TRIGGER_HANDOFF_VALUES:
+        ppt_trigger = requested_value
+    else:
+        raise PptOptionsValidationError(
+            "ppt_trigger must be one of "
+            f"{list(PPT_TRIGGER_HANDOFF_VALUES)} or 'auto'"
+        )
+    return {
+        "ppt_trigger": ppt_trigger,
+        "ppt_master_animation_trigger": ppt_trigger,
+        "pptx2video_click_group_policy": PPT_TRIGGER_TO_CLICK_GROUP_POLICY[
+            ppt_trigger
+        ],
+    }
+
+
 def export_flags_from_options(opts: Mapping[str, object]) -> list[str]:
-    """Derive the exact svg_to_pptx flags from sanitized options."""
+    """Derive the exact svg_to_pptx flags from sanitized options.
+
+    The per-element entrance animation stays opt-in (`ppt_animation` defaults
+    to `none`, matching ppt-master's own default). Once entrance animation is
+    requested, the emitted `--animation-trigger` value always comes from
+    `resolve_ppt_trigger_handoff`, never from an independent local default,
+    so this flag and the sibling pptx2video `--click-group-policy` handoff
+    can never disagree about the user's trigger intent.
+    """
     transition = str(opts.get("ppt_transition") or "fade")
     animation = str(opts.get("ppt_animation") or "none")
     flags = [f"-t {transition}", f"-a {animation}"]
     if animation != "none":
+        trigger_handoff = resolve_ppt_trigger_handoff(opts)
         flags.append(
             f"--animation-trigger "
-            f"{opts.get('ppt_animation_trigger') or 'after-previous'}"
+            f"{trigger_handoff['ppt_master_animation_trigger']}"
         )
     if bool(opts.get("ppt_native_objects")):
         flags.append("--native-objects")
@@ -661,3 +736,60 @@ def parse_json_object(text: str) -> dict:
         if isinstance(value, dict) and not raw[index + end :].strip(" \t\r\n`"):
             return value
     raise PptOptionsValidationError("resolver did not return one clean JSON object")
+
+
+def _cli_resolve_ppt_trigger(argv: list[str] | None = None) -> int:
+    """CLI entry point: resolve one `--ppt-trigger` intent and print JSON.
+
+    This is the only sanctioned way to decide `ppt_trigger` for a Paper2Video
+    run. It exists so the decision is one concrete, non-optional command in
+    `SKILL.md` instead of a described-but-skippable Python call: an agent
+    cannot silently let ppt-master and pptx2video each pick their own
+    default when this command's output is the single source of both the
+    `--animation-trigger` flag sent to ppt-master and the
+    `--click-group-policy` flag sent to pptx2video.
+    """
+    parser = argparse.ArgumentParser(
+        prog="ppt_options_contract.py resolve-ppt-trigger",
+        description=(
+            "Resolve one explicit ppt_trigger intent into the ppt-master "
+            "--animation-trigger flag and the pptx2video --click-group-policy "
+            "flag, so both child skills agree with paper2video's single "
+            "decision instead of disagreeing defaults."
+        ),
+    )
+    parser.add_argument(
+        "--ppt-trigger",
+        default="auto",
+        help=(
+            "One of 'auto' (defaults to on-click), 'on-click', or "
+            "'after-previous'. Use on-click for a downloaded PPTX with a "
+            "continuous 1..N Animation Pane badge sequence. Use "
+            "after-previous only when the user explicitly wants a PPTX that "
+            "also auto-plays natively in PowerPoint."
+        ),
+    )
+    args = parser.parse_args(argv)
+    try:
+        resolved = resolve_ppt_trigger_handoff({"ppt_trigger": args.ppt_trigger})
+    except PptOptionsValidationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(resolved, ensure_ascii=False, indent=2))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] != "resolve-ppt-trigger":
+        print(
+            "usage: ppt_options_contract.py resolve-ppt-trigger "
+            "[--ppt-trigger {auto,on-click,after-previous}]",
+            file=sys.stderr,
+        )
+        return 2
+    return _cli_resolve_ppt_trigger(argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

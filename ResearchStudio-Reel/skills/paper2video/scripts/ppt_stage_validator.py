@@ -1,17 +1,29 @@
-"""Structured validation for Paper2Video's PPT-Master audit.
+"""Structured validation for Paper2Video's PPT-Master and pptx2video handoff.
 
 PPT-Master may phrase an automatically resolved direction differently in its
 receipt, design specification, and execution lock. The validator therefore
 checks concrete locked fields and semantic agreement instead of requiring one
 generated sentence to be copied verbatim between artifacts.
+
+It also audits the final rendered PPTX's native `p:timing` tree directly, so
+the resolved `ppt_trigger` handoff (`on-click` or `after-previous`) is
+verified against the delivered file instead of trusting either child skill's
+own default.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import shlex
+import sys
 import unicodedata
+import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Sequence
+from pathlib import Path
+
+from ppt_options_contract import PPT_TRIGGER_HANDOFF_VALUES
 
 
 _AUDIENCE_STOP_WORDS = frozenset(
@@ -280,3 +292,217 @@ def audit_export_flags(applied_raw: object, expected_flags: Sequence[str]) -> No
             f"PPT-Master export flags mismatch: expected {list(expected_flags)}, "
             f"got {applied_tokens}"
         )
+
+
+P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_SLIDE_XML_RE = re.compile(r"ppt/slides/slide(\d+)\.xml")
+
+# Maps the resolved `ppt_trigger` handoff value (see
+# `ppt_options_contract.resolve_ppt_trigger_handoff`) to the lowercase native
+# `p:cTn/@nodeType` every non-With-Previous Animation Pane row must carry in
+# the final rendered PPTX.
+_EXPECTED_NATIVE_TRIGGER = {
+    "on-click": "clickeffect",
+    "after-previous": "aftereffect",
+}
+
+
+def _slide_xml_parts(pptx_path: Path) -> list[tuple[str, bytes]]:
+    """Return every slide XML part, ordered by its numeric slide filename."""
+    with zipfile.ZipFile(pptx_path) as archive:
+        numbered = [
+            (int(match.group(1)), name)
+            for name in archive.namelist()
+            for match in (_SLIDE_XML_RE.fullmatch(name),)
+            if match
+        ]
+        numbered.sort(key=lambda item: item[0])
+        return [(name, archive.read(name)) for _, name in numbered]
+
+
+def _row_native_trigger(row: ET.Element) -> str:
+    """Return the lowercase native trigger of one Animation Pane row.
+
+    A row's trigger lives on the inner ``p:cTn`` whose ``presetClass`` is the
+    entrance or emphasis effect itself (``entr``/``emph``), not on the row's
+    own outer wrapper node.
+    """
+    for node in row.iter(f"{{{P_NS}}}cTn"):
+        if node.get("presetClass") in ("entr", "emph"):
+            return str(node.get("nodeType") or "").lower()
+    return ""
+
+
+def _slide_click_groups(slide_xml: bytes) -> list[list[str]] | None:
+    """Return one slide's top-level click groups as lists of row triggers.
+
+    Returns ``None`` when the slide has no ``p:timing`` main sequence at all
+    (no entrance/emphasis animation authored on that slide).
+    """
+    root = ET.fromstring(slide_xml)
+    main_sequence = root.find(f".//{{{P_NS}}}cTn[@nodeType='mainSeq']")
+    if main_sequence is None:
+        return None
+    child_list = main_sequence.find(f"{{{P_NS}}}childTnLst")
+    if child_list is None:
+        return []
+    groups: list[list[str]] = []
+    for group in child_list.findall(f"{{{P_NS}}}par"):
+        outer_ctn = group.find(f"{{{P_NS}}}cTn")
+        row_list = (
+            outer_ctn.find(f"{{{P_NS}}}childTnLst")
+            if outer_ctn is not None
+            else None
+        )
+        row_pars = row_list.findall(f"{{{P_NS}}}par") if row_list is not None else []
+        groups.append([_row_native_trigger(row) for row in row_pars])
+    return groups
+
+
+def _non_with_previous_triggers(groups: list[list[str]]) -> list[str]:
+    """Return every ``clickEffect``/``afterEffect`` native trigger on a slide.
+
+    A ``witheffect`` row rides on its group leader's start time and never
+    gets its own Animation Pane badge, so it carries no independent trigger
+    decision to audit. This intentionally includes every such row in a
+    group, not only the first: a preserved (non-normalized) ``after-previous``
+    cascade can hold several ``afterEffect`` rows in one native click group,
+    and each one is still a trigger decision that must match the resolved
+    handoff.
+    """
+    return [
+        trigger
+        for group in groups
+        for trigger in group
+        if trigger != "witheffect"
+    ]
+
+
+def audit_final_pptx_trigger(pptx_path: str | Path, expected_ppt_trigger: str) -> None:
+    """Verify the delivered PPTX's native triggers match the resolved handoff.
+
+    This parses the final rendered ``video.pptx``'s own ``p:timing`` tree --
+    the exact structure PowerPoint's Animation Pane reads -- instead of
+    trusting a JSON report or letting ppt-master and pptx2video each keep
+    their own default. ``expected_ppt_trigger`` must be the value paper2video
+    resolved once with ``ppt_options_contract.resolve_ppt_trigger_handoff``
+    and handed to both ppt-master's ``--animation-trigger`` and pptx2video's
+    ``--click-group-policy``; this function closes the loop by proving the
+    delivered file actually carries that trigger end to end.
+
+    - ``on-click`` requires every non-With-Previous row to be a native
+      ``clickEffect``. That is what gives a downloaded PPTX a continuous
+      ``1..N`` Animation Pane badge sequence.
+    - ``after-previous`` requires every non-With-Previous row, including
+      every row inside a preserved cascade, to be a native ``afterEffect``.
+      That is what makes the PPTX auto-play in PowerPoint, with no numbered
+      Pane guaranteed.
+
+    Slides with no ``p:timing`` main sequence (no entrance/emphasis
+    animation on that slide) are skipped; they carry no trigger to check. If
+    the whole deck has no animated slide at all, this raises: paper2video
+    only calls this audit for a project that requested animated entrances,
+    so a fully static deliverable is itself a silent-degrade failure, not a
+    pass-by-vacuity.
+    """
+    expected_ppt_trigger = str(expected_ppt_trigger or "").strip().lower()
+    if expected_ppt_trigger not in PPT_TRIGGER_HANDOFF_VALUES:
+        raise RuntimeError(
+            "expected_ppt_trigger must be one of "
+            f"{list(PPT_TRIGGER_HANDOFF_VALUES)}, got {expected_ppt_trigger!r}"
+        )
+    expected_trigger = _EXPECTED_NATIVE_TRIGGER[expected_ppt_trigger]
+
+    pptx_path = Path(pptx_path)
+    if not pptx_path.is_file():
+        raise RuntimeError(f"final PPTX not found for trigger audit: {pptx_path}")
+
+    mismatches: list[str] = []
+    animated_slide_count = 0
+    for name, slide_xml in _slide_xml_parts(pptx_path):
+        groups = _slide_click_groups(slide_xml)
+        if groups is None:
+            continue
+        slide_triggers = _non_with_previous_triggers(groups)
+        if not slide_triggers:
+            continue
+        animated_slide_count += 1
+        bad_triggers = sorted({t for t in slide_triggers if t != expected_trigger})
+        if bad_triggers:
+            mismatches.append(
+                f"{name}: expected every non-With-Previous native trigger to be "
+                f"{expected_trigger!r}, found {bad_triggers}"
+            )
+
+    if animated_slide_count == 0:
+        raise RuntimeError(
+            "Final PPTX has no native p:timing entrance/emphasis animation on "
+            "any slide, so the resolved ppt_trigger handoff "
+            f"({expected_ppt_trigger!r}) cannot be verified. If animation was "
+            "not actually requested for this deck, do not call this audit; "
+            "otherwise ppt-master silently dropped the requested animation."
+        )
+    if mismatches:
+        raise RuntimeError(
+            "Final PPTX native animation triggers do not match the resolved "
+            f"ppt_trigger handoff ({expected_ppt_trigger!r} requires every "
+            f"non-With-Previous row to be {expected_trigger!r}):\n"
+            + "\n".join(mismatches)
+        )
+
+
+def _cli_audit_final_pptx_trigger(argv: list[str] | None = None) -> int:
+    """CLI entry point: audit a delivered PPTX against the resolved ppt_trigger.
+
+    This is the only sanctioned way to verify the final `video.pptx` the
+    `/pptx2video` handoff returns. It exists so the check is one concrete,
+    non-optional command in `SKILL.md` instead of a described-but-skippable
+    Python call: a paper2video run is not complete until this command exits
+    0 against the exact `--ppt-trigger` value that was sent to both
+    ppt-master and pptx2video.
+    """
+    parser = argparse.ArgumentParser(
+        prog="ppt_stage_validator.py audit-final-pptx-trigger",
+        description=(
+            "Parse the delivered video.pptx's native p:timing tree and fail "
+            "unless every non-With-Previous Animation Pane row matches the "
+            "resolved ppt_trigger handoff."
+        ),
+    )
+    parser.add_argument("pptx_path", help="Path to the delivered video.pptx")
+    parser.add_argument(
+        "--ppt-trigger",
+        required=True,
+        choices=list(PPT_TRIGGER_HANDOFF_VALUES),
+        help=(
+            "The ppt_trigger value resolved earlier by "
+            "ppt_options_contract.py resolve-ppt-trigger for this run."
+        ),
+    )
+    args = parser.parse_args(argv)
+    try:
+        audit_final_pptx_trigger(args.pptx_path, args.ppt_trigger)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"OK: every non-With-Previous native trigger in {args.pptx_path} "
+        f"matches ppt_trigger={args.ppt_trigger!r}"
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] != "audit-final-pptx-trigger":
+        print(
+            "usage: ppt_stage_validator.py audit-final-pptx-trigger "
+            "<video.pptx> --ppt-trigger {on-click,after-previous}",
+            file=sys.stderr,
+        )
+        return 2
+    return _cli_audit_final_pptx_trigger(argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

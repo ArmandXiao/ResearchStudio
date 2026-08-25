@@ -120,7 +120,7 @@ Render a print-ready conference poster (HTML + PDF + PNG) from a `paper2assets` 
 
 ### 🎬 Paper2Video
 
-Turn a paper into a narrated walkthrough video: editable PPTX, subtitled MP4, no-subtitle MP4 for Paper2Reel, captions, slide frames, visual highlights, and timeline metadata. The recommended path reuses the same `paper2assets` `<outdir>/`, then delegates deck + speaker-note generation to the `ppt-master` skill.
+Turn a paper into a narrated walkthrough video: editable PPTX, subtitled MP4, a raw no-subtitle compatibility copy, captions, slide frames, visual highlights, and timeline metadata. The recommended path reuses the same `paper2assets` `<outdir>/`, then delegates deck + speaker-note generation to the `ppt-master` skill.
 
 <table align="center">
 <tr>
@@ -190,7 +190,7 @@ For the full editorial workflow, image-selection rules, DOCX assembly contract, 
 
 ### 🎞️ Paper2Reel
 
-Assemble the completed poster, video, and blog outputs into an interactive `reel.html` viewer. The reel opens poster-first, highlights sections on hover, and lets readers double-click into a synchronized modal with video, slide thumbnails, captions, and bilingual blog content.
+Assemble the completed poster, video, and blog outputs into an interactive `reel.html` viewer. The reel opens poster-first, highlights sections on hover, and lets readers double-click into a synchronized modal with Bottom-Bar-subtitled video, slide thumbnails, and bilingual blog content.
 
 **Invoke** via Claude Code — point it at the complete shared bundle; starting from a PDF is allowed only because the skill first completes any missing upstream stages:
 
@@ -202,7 +202,7 @@ Assemble the completed poster, video, and blog outputs into an interactive `reel
 > /paper2reel ./my_paper.pdf
 ```
 
-**Outputs** — top-level `reel.html` and `content_alignment.json`, with poster, video, slide, blog, caption, and download support assets under `assets/`. Paper2Reel uses `video_no_subtitles.mp4` for playback so its own CC toggle does not double-subtitle the video. Local validation must use `skills/paper2reel/scripts/serve_reel.py`, because video seeking needs HTTP Range support.
+**Outputs** — top-level `reel.html` and `content_alignment.json`, with poster, video, slide, blog, and download support assets under `assets/`. Paper2Reel uses the final `video.mp4` for playback and section clips so its baked Bottom Bar subtitles remain visible; it does not attach a duplicate CC/VTT layer. Local validation must use `skills/paper2reel/scripts/serve_reel.py`, because video seeking needs HTTP Range support.
 
 For the full bootstrap behavior, alignment map, section-modal UI contract, browser gate, and local serving requirements, see Paper2Reel's [`README.md`](skills/paper2reel/README.md) and [`SKILL.md`](skills/paper2reel/SKILL.md).
 

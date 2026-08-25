@@ -106,7 +106,9 @@ DEFAULT_CONTRACT = {
         "assets/ui/reel-wordmark.png",
         "assets/meta/reel_downloads.json",
     ],
-    "required_media_subdirs": ["assets/media/clips", "assets/media/captions", "assets/media/slide_clips"],
+    "required_media_subdirs": ["assets/media/clips", "assets/media/slide_clips"],
+    "required_video_source_kind": "burned_bottom_bar",
+    "required_caption_delivery": "burned_bottom_bar",
     "min_blog_text_chars": 80,
     "min_download_buttons": 4,
 }
@@ -1110,23 +1112,25 @@ def validate_static(
     if require_media and not (viewer_dir / "assets" / "media" / "video.mp4").is_file():
         add_finding(findings, "ERROR", "FULL_VIDEO_MISSING", "assets/media/video.mp4 is missing.", path="assets/media/video.mp4")
     artifacts = alignment.get("artifacts") if isinstance(alignment.get("artifacts"), dict) else {}
-    if require_media and artifacts.get("video_source_kind") != "raw_pre_subtitle":
+    expected_video_source = str(contract.get("required_video_source_kind") or "burned_bottom_bar")
+    expected_caption_delivery = str(contract.get("required_caption_delivery") or "burned_bottom_bar")
+    if require_media and artifacts.get("video_source_kind") != expected_video_source:
         add_finding(
             findings,
             "ERROR",
-            "REEL_VIDEO_SOURCE_NOT_RAW",
-            "paper2reel must use the raw pre-subtitle video as its playback source; subtitles are supplied by the CC/VTT toggle.",
+            "REEL_VIDEO_SOURCE_NOT_BURNED_BOTTOM_BAR",
+            "paper2reel playback and section clips must use the final video with baked Bottom Bar subtitles.",
             path=rel(alignment_path, viewer_dir),
-            data={"actual": artifacts.get("video_source_kind")},
+            data={"actual": artifacts.get("video_source_kind"), "expected": expected_video_source},
         )
-    if require_captions and artifacts.get("caption_delivery") != "sidecar_vtt_toggle":
+    if require_captions and artifacts.get("caption_delivery") != expected_caption_delivery:
         add_finding(
             findings,
             "ERROR",
-            "REEL_CAPTION_DELIVERY_NOT_TOGGLEABLE",
-            "paper2reel captions must be delivered as sidecar VTT tracks so the CC button controls them.",
+            "REEL_CAPTION_DELIVERY_NOT_BURNED_BOTTOM_BAR",
+            "paper2reel captions must be baked into the Bottom Bar; sidecar tracks can duplicate the text.",
             path=rel(alignment_path, viewer_dir),
-            data={"actual": artifacts.get("caption_delivery")},
+            data={"actual": artifacts.get("caption_delivery"), "expected": expected_caption_delivery},
         )
     if not any((viewer_dir / "assets" / "slides").glob("slide_*.*")):
         add_finding(findings, "ERROR", "SLIDE_FRAMES_MISSING", "assets/slides/ contains no slide frames.", path="assets/slides/")
@@ -1214,13 +1218,6 @@ def validate_static(
                 add_finding(findings, "ERROR", "SECTION_CLIP_MISSING", f"Section {sid} has no video clip path.", path=rel(alignment_path, viewer_dir), data={"section": sid})
             elif not (viewer_dir / str(clip)).is_file():
                 add_finding(findings, "ERROR", "SECTION_CLIP_FILE_MISSING", f"Section {sid} video clip file is missing.", path=str(clip), data={"section": sid})
-
-        if require_captions:
-            captions = raw_section.get("captions")
-            if not captions:
-                add_finding(findings, "ERROR", "SECTION_CAPTIONS_MISSING", f"Section {sid} has no subtitle track.", path=rel(alignment_path, viewer_dir), data={"section": sid})
-            elif not (viewer_dir / str(captions)).is_file():
-                add_finding(findings, "ERROR", "SECTION_CAPTIONS_FILE_MISSING", f"Section {sid} subtitle file is missing.", path=str(captions), data={"section": sid})
 
         if require_blog:
             en_blocks = blocks_for_language(raw_section, "en")
@@ -2676,8 +2673,18 @@ def browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contract: 
                             add_finding(findings, "ERROR", "SECTION_VIDEO_NOT_CLIP", "Section modal video is not a section clip.", data={"section": sid, "src": video_src})
                         if video_state.get("muted") or float(video_state.get("volume") or 0) <= 0:
                             add_finding(findings, "ERROR", "SECTION_VIDEO_MUTED", "Section video is muted or has zero volume.", data={"section": sid, **video_state})
-                        if page.locator("#captionToggle").count() != 1:
-                            add_finding(findings, "ERROR", "CAPTION_TOGGLE_MISSING", "Section modal is missing the CC subtitle toggle.", data={"section": sid})
+                        caption_state = page.locator("#sectionVideo").evaluate(
+                            """video => {
+                              const button = document.getElementById('captionToggle');
+                              return {
+                                buttonHidden: !button || button.hidden || getComputedStyle(button).display === 'none',
+                                buttonDisabled: !button || button.disabled,
+                                trackCount: video.querySelectorAll('track[data-reel-caption]').length
+                              };
+                            }"""
+                        )
+                        if not caption_state.get("buttonHidden") or not caption_state.get("buttonDisabled") or int(caption_state.get("trackCount") or 0) != 0:
+                            add_finding(findings, "ERROR", "REEL_SIDECAR_CAPTIONS_PRESENT", "Baked Bottom Bar playback must not expose CC or attach a duplicate sidecar subtitle track.", data={"section": sid, **caption_state})
                         if page.locator("#playSoundBtn").count() != 1:
                             add_finding(findings, "ERROR", "SOUND_BUTTON_MISSING", "Section modal is missing the explicit sound playback button.", data={"section": sid})
                         if thumb_count < 1:
@@ -2929,25 +2936,18 @@ def file_browser_gate(viewer_dir: Path, screenshot: Path | None = None, *, contr
                     if zh_text_len < min_blog_text:
                         add_finding(findings, "ERROR", "SECTION_BLOG_CN_TOO_SHORT", "Chinese blog content is missing or too short in file-open mode.", data={"section": sid, "text_length": zh_text_len, "required": min_blog_text})
 
-                    page.locator("#captionToggle").click()
-                    page.wait_for_timeout(500)
                     caption_state = page.locator("#sectionVideo").evaluate(
                         """video => {
-                          const tracks = Array.from(video.querySelectorAll('track[data-reel-caption]'));
-                          const textTracks = Array.from(video.textTracks || []);
+                          const button = document.getElementById('captionToggle');
                           return {
-                            button: document.getElementById('captionToggle').textContent,
-                            trackCount: tracks.length,
-                            trackSrc: tracks[0] ? tracks[0].src : '',
-                            textTrackModes: textTracks.map(track => track.mode),
-                            cueCounts: textTracks.map(track => track.cues ? track.cues.length : 0)
+                            buttonHidden: !button || button.hidden || getComputedStyle(button).display === 'none',
+                            buttonDisabled: !button || button.disabled,
+                            trackCount: video.querySelectorAll('track[data-reel-caption]').length
                           };
                         }"""
                     )
-                    if int(caption_state.get("trackCount") or 0) < 1 or "data:text/vtt" not in str(caption_state.get("trackSrc")):
-                        add_finding(findings, "ERROR", "FILE_CAPTION_NOT_INLINE", "file-open mode must use inline/data URI captions so CC works without HTTP.", data=caption_state)
-                    if "showing" not in (caption_state.get("textTrackModes") or []):
-                        add_finding(findings, "ERROR", "CAPTION_TOGGLE_BROKEN", "CC toggle did not show captions in file-open mode.", data=caption_state)
+                    if not caption_state.get("buttonHidden") or not caption_state.get("buttonDisabled") or int(caption_state.get("trackCount") or 0) != 0:
+                        add_finding(findings, "ERROR", "FILE_SIDECAR_CAPTIONS_PRESENT", "Baked Bottom Bar playback must not expose CC or attach a duplicate sidecar subtitle track in file-open mode.", data=caption_state)
 
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(150)
@@ -3017,7 +3017,7 @@ def main() -> None:
     parser.add_argument("--file-browser", action="store_true", help="Run Playwright direct-open file:// interaction gate in addition to static checks.")
     parser.add_argument("--no-require-media", action="store_true", help="Do not require assets/media/video.mp4 or section clips.")
     parser.add_argument("--no-require-blog", action="store_true", help="Do not require EN/CN blog blocks per section.")
-    parser.add_argument("--no-require-captions", action="store_true", help="Do not require subtitle tracks per section.")
+    parser.add_argument("--no-require-captions", action="store_true", help="Do not require baked Bottom Bar caption delivery metadata.")
     parser.add_argument("--screenshot", type=Path, help="Optional browser-gate screenshot path.")
     parser.add_argument("--report", type=Path, help="Write JSON QA report.")
     args = parser.parse_args()

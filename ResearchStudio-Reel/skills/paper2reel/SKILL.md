@@ -20,8 +20,8 @@ It maps the canonical section ids from `paper2assets`'s `assets/meta/sections.js
 - poster DOM targets, usually `[data-section="<id>"]`;
 - slide frame targets, usually one or more slide indexes;
 - blog blocks rendered from the same paper2blog content used for final DOCX;
-- video clips and subtitles derived from the same paper2video timeline used for
-  final MP4 delivery.
+- video clips cut from the same final, Bottom-Bar-subtitled MP4 and timeline
+  used for paper2video delivery.
 
 This sidecar lets a wrapper UI switch between Poster / Slides / Blog and jump to
 the corresponding location without adding visible engineering tags to the
@@ -43,9 +43,9 @@ section interactions:
 - double-clicking a poster section opens a large modal.
 - clicking or double-clicking the poster title opens the full-paper modal.
 
-The modal must use the section-media layout: video on the left, blog on the
-right, EN/中文 switching, optional subtitles, slide thumbnails below the video,
-and a draggable splitter. Do not replace this with a Poster / Slides / Video /
+The modal must use the section-media layout: video with baked Bottom Bar
+subtitles on the left, blog on the right, EN/中文 switching, slide thumbnails
+below the video, and a draggable splitter. Do not replace this with a Poster / Slides / Video /
 Blog tabbed viewer. A tabbed viewer is a regression because it drops the
 section-level interaction contract.
 
@@ -58,9 +58,9 @@ answer MP4 Range requests with `200 OK` instead of `206 Partial Content`.
 The viewer is intentionally template-locked. Treat
 `assets/section_modal_contract.json` as the golden UI contract distilled from
 the hand-tuned Attention reel: fixed section-modal template, hidden
-topbar by default, `v/h/a/s/d` shortcuts, debug opacity slider, CC button,
-download menu, draggable splitter, slide thumbnails, EN/CN blog panes, and
-timeline-backed section clips. Do not ask an agent to redesign this HTML. The
+topbar by default, `v/h/a/s/d` shortcuts, debug opacity slider, baked subtitle
+playback, download menu, draggable splitter, slide thumbnails, EN/CN blog
+panes, and timeline-backed section clips. Do not ask an agent to redesign this HTML. The
 builder may only fill data into the fixed template and copy self-contained
 assets.
 
@@ -75,12 +75,11 @@ to the user:
 <video_outdir>/                        # video*.mp4, manifest.json, assets/
 ```
 
-Do not build a reel from stale example files, old `exports/` folders, or the
-burned-in subtitle final MP4. The viewer's playback video must use the
-no-subtitles final render, normally
-`<video_outdir>/video_no_subtitles.mp4`, because
-`paper2reel` provides its own CC/VTT subtitle toggle. The downloadable video
-bundle may still include the subtitled `<video_outdir>/video.mp4`.
+Do not build a reel from stale example files or old `exports/` folders. The
+viewer and all timeline-backed clips must use the final
+`<video_outdir>/video.mp4`, whose subtitles are baked into the appended black
+Bottom Bar. Do not attach the VTT sidecar in the Reel viewer; doing so would
+duplicate text already present in every video frame.
 
 Build the user-facing viewer directly in a v2 reel bundle:
 
@@ -197,7 +196,7 @@ standalone offline bundles unless the caller explicitly chooses otherwise.
 ## Timeline-Backed Section Media
 
 When paper2video has produced `timeline.json`, use it as the source of truth
-for modal video clips, slide clips, subtitles, and section timing. Do not cut
+for modal video clips, slide clips, and section timing. Do not cut
 section videos from guessed MP4 timestamps. The section clips should be composed
 from complete timeline slide clips and end with a short silent freeze tail, so
 the modal does not stop mid-motion or mid-thought.
@@ -206,8 +205,8 @@ the modal does not stop mid-motion or mid-thought.
 python skills/paper2reel/scripts/build_section_media_from_timeline.py \
   --viewer-dir <reel_outdir> \
   --timeline <video_outdir>/assets/meta/timeline.json \
-  --video <video_outdir>/video_no_subtitles.mp4 \
-  --captions-vtt <video_outdir>/assets/captions/video.vtt \
+  --video <video_outdir>/video.mp4 \
+  --allow-burned-subtitle-video \
   --section-tail-seconds 0.9
 ```
 
@@ -216,15 +215,15 @@ This updates:
 ```text
 <viewer_outdir>/content_alignment.json
 <viewer_outdir>/reel.html   # inline ALIGNMENT refreshed when present
-<viewer_outdir>/assets/media/video.mp4   # raw pre-subtitle playback copy
+<viewer_outdir>/assets/media/video.mp4   # final playback copy with baked Bottom Bar
 <viewer_outdir>/assets/media/clips/<section>.mp4
 <viewer_outdir>/assets/media/slide_clips/slide-XX.mp4
-<viewer_outdir>/assets/media/captions/...
 ```
 
-The script refuses `<video_outdir>/video.mp4` by default because that file
-is normally burned-in with subtitles. Passing it into `paper2reel` would
-double-render text when the user turns on CC.
+The deterministic Reel bootstrap passes `--allow-burned-subtitle-video` to
+declare that the selected source is the final Bottom Bar render. In this mode
+the builder records `burned_bottom_bar` for both video source and caption
+delivery and does not expose a sidecar CC track.
 
 `timeline.json` must already contain the explicit section mapping. If the deck
 uses slide ids instead of canonical poster ids, build the timeline with
@@ -247,7 +246,7 @@ python skills/paper2reel/scripts/check_reel_package.py \
 The checker must pass before marking paper2reel complete. It validates
 that the delivered viewer is the section-modal UI, not the stale tabbed viewer,
 and confirms in a real browser that default poster-only view, shortcuts,
-double-click section modal, video clip, subtitle toggle, slide thumbnails, and
+double-click section modal, baked-subtitle video clip, slide thumbnails, and
 blog text work. It also verifies MP4 byte-range support and exercises real
 video seeking: clicking a later slide thumbnail must move `sectionVideo` to the
 thumbnail timestamp, and direct progress-bar style seeking must succeed for
@@ -257,7 +256,7 @@ The same final `reel.html` must also support direct local opening with
 `file://` or a double-click. In direct-open mode the viewer embeds the copied
 poster HTML through `iframe.srcdoc`, sets the poster base URL to
 `assets/poster/`, localizes poster render resources such as MathJax under
-`assets/poster/`, and uses inline/data-URI captions so the section modal,
+`assets/poster/`, and preserves the baked Bottom Bar while the section modal,
 poster hover, shortcuts, blog pane, slide-thumbnail seeking, and direct video
 seeking remain usable without starting a server. This is a user-facing feature
 parity path, not an HTTP protocol replacement: `file://` has no HTTP 206 Range
@@ -265,11 +264,11 @@ headers, so `--browser` remains required for Range/seek validation and
 `--file-browser` separately validates the direct-open runtime.
 
 The checker reads `assets/section_modal_contract.json`. Missing any required
-golden-contract feature is a blocking ERROR: shortcut handlers, CC toggle,
-debug slider, paper2poster's native debug bbox/size overlay, the golden
-download pill with icon and `All | Poster | Video | Blog` links, section-rail
-hover styling, section clip, raw pre-subtitle playback video, toggleable VTT
-captions, blog images, or the fixed template/version markers.
+golden-contract feature is a blocking ERROR: shortcut handlers, debug slider,
+paper2poster's native debug bbox/size overlay, the golden download pill with
+icon and `All | Poster | Video | Blog` links, section-rail hover styling,
+section clips with baked Bottom Bar subtitles, absence of duplicate sidecar
+tracks, blog images, or the fixed template/version markers.
 
 Download QA follows the manifest's explicit `delivery` field. In
 `materialized` mode it validates the four ZIPs using the existing archive

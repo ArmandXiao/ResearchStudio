@@ -373,6 +373,7 @@ body.resizing { cursor:col-resize; user-select:none; }
 .sound-button.show { display:block; }
 .caption-toggle:hover, .caption-toggle.active { background:rgba(214,74,54,.9); border-color:rgba(255,255,255,.82); }
 .caption-toggle[disabled] { opacity:.45; cursor:not-allowed; background:rgba(8,14,18,.45); }
+.caption-toggle[hidden] { display:none !important; }
 .thumb-row { display:flex; gap:8px; overflow:auto; min-height:98px; align-items:stretch; }
 .thumb-btn { flex:0 0 auto; width:138px; border:2px solid transparent; border-radius:6px; padding:0; background:#ffffff; cursor:pointer; overflow:hidden; text-align:left; color:#172026; }
 .thumb-btn:hover, .thumb-btn.active { border-color:var(--hot); }
@@ -446,7 +447,7 @@ body.resizing { cursor:col-resize; user-select:none; }
         <div class="video-shell">
           <video id="sectionVideo" controls preload="metadata"></video>
           <button class="sound-button" id="playSoundBtn" type="button">Play Sound</button>
-          <button class="caption-toggle" id="captionToggle" type="button" aria-pressed="false" title="Show subtitles">CC</button>
+          <button class="caption-toggle" id="captionToggle" type="button" aria-pressed="false" title="Show subtitles" hidden>CC</button>
         </div>
         <div class="thumb-row" id="thumbRow"></div>
       </div>
@@ -581,6 +582,7 @@ function renderThumbs() {
   }).join('');
 }
 function captionSrcForClip(src) {
+  if (!ALIGNMENT.artifacts || ALIGNMENT.artifacts.caption_delivery !== 'sidecar_vtt_toggle') return '';
   const clean = String(src || '').split('?')[0];
   if (!clean) return '';
   if (clean === artifactVideo() || clean.endsWith('/video.mp4') || clean === 'assets/media/video.mp4' || clean === 'media/video.mp4') return (ALIGNMENT.artifacts && ALIGNMENT.artifacts.captions) || 'assets/media/captions/video.vtt';
@@ -600,8 +602,15 @@ function applyCaptionMode() {
 function setCaptionTrackForClip(src) {
   const capSrc = captionSrcForClip(src);
   Array.from(video.querySelectorAll('track[data-reel-caption]')).forEach(track => track.remove());
-  if (!capSrc) { captionToggle.disabled = true; applyCaptionMode(); return; }
+  if (!capSrc) {
+    subtitlesEnabled = false;
+    captionToggle.disabled = true;
+    captionToggle.hidden = true;
+    applyCaptionMode();
+    return;
+  }
   captionToggle.disabled = false;
+  captionToggle.hidden = false;
   const track = document.createElement('track');
   track.kind = 'subtitles';
   track.label = 'English';

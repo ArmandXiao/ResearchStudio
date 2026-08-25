@@ -59,9 +59,10 @@
   ],
   "required_media_subdirs": [
     "assets/media/clips",
-    "assets/media/captions",
     "assets/media/slide_clips"
   ],
+  "required_video_source_kind": "burned_bottom_bar",
+  "required_caption_delivery": "burned_bottom_bar",
   "min_blog_text_chars": 80,
   "min_download_buttons": 4,
   "download_schema_version": "paper2reel.downloads.v1",

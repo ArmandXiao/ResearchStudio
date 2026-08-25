@@ -1,6 +1,6 @@
 # paper2reel
 
-> Turn the poster, blog, and video deliverables for one paper into an interactive `reel.html` viewer that aligns poster sections, slide thumbnails, video seek times, captions, and bilingual blog content.
+> Turn the poster, blog, and video deliverables for one paper into an interactive `reel.html` viewer that aligns poster sections, slide thumbnails, video seek times, baked video captions, and bilingual blog content.
 
 `paper2reel` is the **convergence stage** of the ResearchStudio pipeline. It does not replace or mutate `paper2poster`, `paper2blog`, or `paper2video`; it reads their completed v2 outputs and builds a self-contained viewer on top.
 
@@ -28,16 +28,16 @@ Written back into the same v2 bundle root:
 | File | What it is |
 |---|---|
 | `reel.html` | Interactive viewer: poster-first home, section hover, modal video/blog view, top menu, downloads, shortcuts |
-| `content_alignment.json` | Sidecar alignment map from poster sections to slides, video timestamps, captions, and blog blocks |
+| `content_alignment.json` | Sidecar alignment map from poster sections to slides, video timestamps, and blog blocks |
 | `manifest.json` | Updated v2 package index with root-relative reel deliverables |
 | `assets/poster/` | Poster HTML/PDF/PNG/PPTX copies used by the viewer and downloads |
-| `assets/media/` | Video assets, section clips, VTT captions, and media metadata |
+| `assets/media/` | Final Bottom-Bar-subtitled video, section clips, and media metadata |
 | `assets/slides/` | Slide thumbnails / frames used for timeline navigation |
 | `assets/blog/` | HTML-rendered blog blocks and embedded blog images |
 | `assets/meta/reel_downloads.json` | Structured All/Poster/Video/Blog source manifest |
 | `assets/downloads/` | Persisted ZIPs in standalone `materialized` mode only |
 
-`video_no_subtitles.mp4` is the playback source for the reel. The final subtitled `video.mp4` remains downloadable, but using it for in-reel playback would double-subtitle once the viewer CC toggle is enabled.
+`video.mp4` is the playback source for the Reel and for every timeline-backed clip. Its subtitles are already baked into the appended black Bottom Bar, so the Viewer does not attach the VTT sidecar or expose a second CC layer.
 
 ## Usage
 
@@ -66,7 +66,7 @@ The generated `reel.html` also supports direct local opening. You may double-cli
 `reel.html` or open it through `file://` as long as the whole v2 bundle folder is
 kept together. Under `file://`, the viewer embeds the copied poster through
 `iframe.srcdoc`, localizes poster render resources such as MathJax into
-`assets/poster/`, and keeps the same poster hover, section modal, captions,
+`assets/poster/`, and keeps the same poster hover, section modal, baked captions,
 blog, thumbnails, and shortcuts. Standalone `materialized` bundles keep their
 offline ZIP links; `on_demand` bundles hide those online-only links under
 `file://`. The HTTP server remains the golden preview path for Range/206
@@ -79,12 +79,12 @@ validation; direct-open mode is validated by a separate file-browser gate.
 3. **Build the poster/slide base viewer** without mutating the original poster or deck deliverables.
 4. **Attach timeline-backed media** from `paper2video` so slide thumbnails and direct video seeking use the same timestamp contract.
 5. **Render blog content** into the modal's right pane, keeping images and headings from the DOCX/article outlines.
-6. **Write `content_alignment.json`** so each canonical section id maps to poster area, slides, video clips, captions, and blog blocks.
+6. **Write `content_alignment.json`** so each canonical section id maps to poster area, slides, video clips, and blog blocks.
 7. **Run both browser gates** to prove the delivered viewer works over HTTP and when opened directly from disk, not just that files exist.
 
 ## Viewer contract
 
-The default view is poster-first. Sections highlight on hover; double-clicking a poster section opens the section modal. The title region opens the full-paper modal. The modal places video on the left and blog on the right, with a draggable split, subtitle toggle, slide thumbnails that seek the video, and direct progress-bar seeking. Keyboard shortcuts include audio, help, and top-menu controls.
+The default view is poster-first. Sections highlight on hover; double-clicking a poster section opens the section modal. The title region opens the full-paper modal. The modal places the Bottom-Bar-subtitled video on the left and blog on the right, with a draggable split, slide thumbnails that seek the video, and direct progress-bar seeking. Keyboard shortcuts include audio, help, and top-menu controls.
 
 Downloads and the top menu are part of the delivered UI, not optional extras.
 The explicit manifest field `delivery` selects `materialized` (default,
@@ -98,7 +98,7 @@ standalone use remains backward-compatible.
 scripts/
 ├── build_reel_from_paper.py          # inspect/complete bundle and assemble final reel
 ├── build_poster_slides_view.py       # poster + slides base viewer
-├── build_section_media_from_timeline.py # section clips/captions from video timeline
+├── build_section_media_from_timeline.py # section clips from the final video timeline
 ├── check_reel_package.py             # browser-backed hard QA gate
 ├── reel_downloads.py                 # shared manifest/path/archive contract
 └── serve_reel.py                     # Range-capable local preview server

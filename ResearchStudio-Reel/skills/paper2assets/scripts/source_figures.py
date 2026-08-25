@@ -13,8 +13,11 @@ skip all of that:
   --images <p|url>…  use figures the user attached / linked directly.
 
 Writes assets/figures/*.png + assets/meta/figures.json in the SAME schema as
-extract_pdf.py. Exits 0 if >=1 figure was produced, non-zero otherwise (the
-caller then falls back to the crop pipeline). Never raises on a bad source.
+extract_pdf.py.  If only some TeX figures can be used directly, unresolved or
+multi-file figures are left as explicit ``pdf-crop-pending`` records for
+extract_pdf.py to fill by caption label. Exits 0 if >=1 source figure was
+produced, non-zero otherwise (the caller then falls back to the full crop
+pipeline). Never raises on a bad source.
 
 Text / metadata are unaffected.  TeX captions stay authoritative for source
 figures; PDF-text captions are retained only as alignment candidates.
@@ -181,12 +184,17 @@ def parse_tex_figures(main_tex: Path) -> list[dict]:
         if not incls:
             continue
         cap = ""
-        cm = _CAP.search(body)
-        if cm:
+        # Composite figures commonly contain child ``subfigure`` captions
+        # before the outer Figure caption.  The outer caption/label is the
+        # final pair in normal LaTeX figure structure; using the first pair
+        # misidentifies the whole composite as its first panel.
+        captions = list(_CAP.finditer(body))
+        if captions:
+            cm = captions[-1]
             cap = _clean_caption(_balanced(body, cm.end() - 1))
-        lm = _LABEL.search(body)
+        labels = _LABEL.findall(body)
         out.append({"graphics": incls, "caption": cap,
-                    "label": lm.group(1) if lm else "", "gpaths": gpaths})
+                    "label": labels[-1] if labels else "", "gpaths": gpaths})
     return out
 
 
@@ -344,9 +352,8 @@ def sync_figure_captions(outdir: Path) -> int:
     if not isinstance(figures, list) or not captions:
         return 0
 
-    unused = set(range(len(captions)))
-    aligned = 0
-    for figure in figures:
+    source_captions: dict[int, str] = {}
+    for index, figure in enumerate(figures):
         if not isinstance(figure, dict):
             continue
         source_caption = str(
@@ -354,33 +361,72 @@ def sync_figure_captions(outdir: Path) -> int:
             or (figure.get("caption", "") if figure.get("source") == "original" else "")
             or ""
         )
+        if source_caption:
+            source_captions[index] = source_caption
+
+    # Score the complete matrix before assigning anything.  A greedy
+    # "unused captions" pass can let a later figure inherit its second-best
+    # label after an earlier row consumed the true match.  Require the match
+    # to be uniquely best in both directions instead.
+    row_matches: dict[int, tuple[int, float, float]] = {}
+    for figure_index, source_caption in source_captions.items():
+        ranked = sorted(
+            (
+                (_caption_similarity(source_caption, caption["text"]), caption_index)
+                for caption_index, caption in enumerate(captions)
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        if ranked:
+            score, chosen = ranked[0]
+            second = ranked[1][0] if len(ranked) > 1 else 0.0
+            row_matches[figure_index] = (chosen, score, score - second)
+
+    column_matches: dict[int, tuple[int, float, float]] = {}
+    for caption_index, caption in enumerate(captions):
+        ranked = sorted(
+            (
+                (_caption_similarity(source_caption, caption["text"]), figure_index)
+                for figure_index, source_caption in source_captions.items()
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        if ranked:
+            score, chosen = ranked[0]
+            second = ranked[1][0] if len(ranked) > 1 else 0.0
+            column_matches[caption_index] = (chosen, score, score - second)
+
+    aligned = 0
+    for figure_index, figure in enumerate(figures):
+        if not isinstance(figure, dict):
+            continue
+        source_caption = source_captions.get(figure_index, "")
         chosen: int | None = None
         score = 0.0
         margin = 0.0
-        if source_caption:
-            ranked = sorted(
-                (
-                    (_caption_similarity(source_caption, captions[idx]["text"]), idx)
-                    for idx in unused
-                ),
-                reverse=True,
-            )
-            if ranked:
-                score = ranked[0][0]
-                second = ranked[1][0] if len(ranked) > 1 else 0.0
-                margin = score - second
-                if score >= 0.72 and (len(ranked) == 1 or margin >= 0.08):
-                    chosen = ranked[0][1]
+        reverse_margin = 0.0
+        if figure_index in row_matches:
+            candidate, score, margin = row_matches[figure_index]
+            reverse = column_matches.get(candidate)
+            if reverse:
+                reverse_figure, _, reverse_margin = reverse
+                if (
+                    score >= 0.72
+                    and margin >= 0.08
+                    and reverse_figure == figure_index
+                    and reverse_margin >= 0.08
+                ):
+                    chosen = candidate
         if chosen is None:
             figure["caption_alignment"] = {
-                "method": "source-caption-similarity",
+                "method": "mutual-source-caption-similarity",
                 "status": "unresolved",
                 "confidence": round(score, 3),
                 "margin": round(margin, 3),
+                "reverse_margin": round(reverse_margin, 3),
             }
             continue
 
-        unused.remove(chosen)
         caption = captions[chosen]
         figure["source_caption"] = source_caption
         figure["original_label"] = caption["label"]
@@ -405,10 +451,11 @@ def sync_figure_captions(outdir: Path) -> int:
         )
         figure["caption_candidates"] = candidates
         figure["caption_alignment"] = {
-            "method": "source-caption-similarity",
+            "method": "mutual-source-caption-similarity",
             "status": "aligned",
             "confidence": round(score, 3),
             "margin": round(margin, 3),
+            "reverse_margin": round(reverse_margin, 3),
         }
         aligned += 1
 
@@ -416,12 +463,40 @@ def sync_figure_captions(outdir: Path) -> int:
     return aligned
 
 
-def write_figures(entries: list[tuple[Path, str, str]], outdir: Path) -> int:
-    """entries = [(rasterised_png, caption, label)] in figure order."""
+def write_figures(entries: list[dict], outdir: Path) -> tuple[int, int]:
+    """Write source rasters and pending PDF-fallback records in figure order."""
     figdir = layout.figures_dir(outdir, create=True)
     manifest = []
-    for i, (png, caption, label) in enumerate(entries, 1):
-        final = figdir / f"figure{i}.png"
+    source_count = 0
+    fallback_count = 0
+    for entry in entries:
+        order = int(entry["order"])
+        png = entry.get("png")
+        caption = str(entry.get("caption") or "")
+        label = str(entry.get("label") or "")
+        clabel = f"Figure {order}"
+        common = {
+            "page": 0,
+            "original_label": clabel,
+            "caption_label": clabel,
+            "caption": caption,
+            "caption_candidates": [
+                {"label": label or clabel, "text": caption, "source": "tex"}
+            ],
+            "source_label": label,
+            "source_caption": caption,
+            "source_order": order,
+        }
+        if png is None:
+            manifest.append({
+                **common,
+                "source": "pdf-crop-pending",
+                "fallback_reason": str(entry.get("fallback_reason") or "unresolved-source"),
+            })
+            fallback_count += 1
+            continue
+
+        final = figdir / f"figure{order}.png"
         if png.resolve() != final.resolve():
             shutil.move(str(png), str(final))
         try:
@@ -429,24 +504,19 @@ def write_figures(entries: list[tuple[Path, str, str]], outdir: Path) -> int:
             w, h = Image.open(final).size
         except Exception:
             w = h = 0
-        clabel = f"Figure {i}"
-        cap = caption or ""
         manifest.append({
+            **common,
             "file": f"{layout.FIGURES}/{final.name}",
             "page": 0, "page_width": w, "page_height": h,
             "width": w, "height": h, "column": "full", "num_columns": 1,
-            "original_label": clabel,
-            "caption_label": clabel, "caption": cap,
-            "caption_candidates": [{"label": clabel, "text": cap, "source": "tex"}],
-            "source_label": label,
-            "source_caption": caption,
             "source": "original",
         })
+        source_count += 1
     layout.meta_file(outdir, "figures", create_parent=True).write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
     )
     sync_figure_captions(outdir)
-    return len(manifest)
+    return source_count, fallback_count
 
 
 def main() -> int:
@@ -461,7 +531,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        entries: list[tuple[Path, str, str]] = []
+        entries: list[dict] = []
 
         if a.images:
             for j, ref in enumerate(a.images, 1):
@@ -470,7 +540,10 @@ def main() -> int:
                     continue
                 png = rasterize(src, tmp / f"img{j}.png", a.dpi)
                 if png is not None:
-                    entries.append((tmp / f"img{j}.png", "", ""))
+                    entries.append({
+                        "png": tmp / f"img{j}.png", "caption": "", "label": "",
+                        "order": len(entries) + 1,
+                    })
         elif a.arxiv:
             aid = _arxiv_id(a.arxiv)
             print(f"[source_figures] arXiv {aid}: downloading source…")
@@ -483,28 +556,59 @@ def main() -> int:
                 print(f"[source_figures] parsed {len(figs)} figure env(s) from {main_tex.name}")
                 for k, fig in enumerate(figs, 1):
                     if len(fig["graphics"]) != 1:
-                        # A caption describing a six-panel composite must not
-                        # be attached to only the first child raster.  The PDF
-                        # crop path can recover the rendered composite safely.
+                        # Keep the figure's exact TeX identity in the manifest.
+                        # extract_pdf.py will align that caption to a printed
+                        # Figure label and replace only this record with the
+                        # rendered composite crop.
                         _eprint(
                             f"[source_figures]   fig{k}: "
                             f"{len(fig['graphics'])} includegraphics entries; "
-                            "skip incomplete source composite"
+                            "defer this composite to PDF crop"
                         )
-                        return 3
+                        entries.append({
+                            "png": None,
+                            "caption": fig["caption"],
+                            "label": fig["label"],
+                            "order": k,
+                            "fallback_reason": f"composite:{len(fig['graphics'])}-graphics",
+                        })
+                        continue
                     ref = fig["graphics"][0]
                     src = _resolve((tmp / "source"), ref, fig["gpaths"])
                     if not src:
                         _eprint(f"[source_figures]   fig{k}: could not resolve {ref}")
+                        entries.append({
+                            "png": None,
+                            "caption": fig["caption"],
+                            "label": fig["label"],
+                            "order": k,
+                            "fallback_reason": "unresolved-graphic",
+                        })
                         continue
                     if rasterize(src, tmp / f"f{k}.png", a.dpi) is not None:
-                        entries.append((tmp / f"f{k}.png", fig["caption"], fig["label"]))
+                        entries.append({
+                            "png": tmp / f"f{k}.png",
+                            "caption": fig["caption"],
+                            "label": fig["label"],
+                            "order": k,
+                        })
+                    else:
+                        entries.append({
+                            "png": None,
+                            "caption": fig["caption"],
+                            "label": fig["label"],
+                            "order": k,
+                            "fallback_reason": "rasterize-failed",
+                        })
             else:                                    # no tex figures -> all graphics
                 gfx = sorted(p for p in (tmp / "source").rglob("*")
                              if p.suffix.lower() in _GRAPHIC_EXT and p.stat().st_size > 2000)
                 for k, src in enumerate(gfx, 1):
                     if rasterize(src, tmp / f"f{k}.png", a.dpi) is not None:
-                        entries.append((tmp / f"f{k}.png", "", ""))
+                        entries.append({
+                            "png": tmp / f"f{k}.png", "caption": "", "label": "",
+                            "order": len(entries) + 1,
+                        })
         else:
             _eprint("[source_figures] need --arxiv or --images")
             return 2
@@ -512,9 +616,19 @@ def main() -> int:
         if not entries:
             _eprint("[source_figures] produced 0 figures — fall back to crop.")
             return 4
-        n = write_figures(entries, outdir)
+        if not any(entry.get("png") is not None for entry in entries):
+            _eprint("[source_figures] produced 0 source figures — fall back to full PDF crop.")
+            return 4
+        source_count, fallback_count = write_figures(entries, outdir)
 
-    print(f"[source_figures] wrote {n} original figure(s) -> {figdir}  (crop loop skipped)")
+    print(f"[source_figures] wrote {source_count} original figure(s) -> {figdir}")
+    if fallback_count:
+        print(
+            f"[source_figures] deferred {fallback_count} figure(s) to selective PDF crop; "
+            "run extract_pdf.py --no-figures to fill them"
+        )
+    else:
+        print("[source_figures] no PDF fallback needed (crop loop skipped)")
     return 0
 
 

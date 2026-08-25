@@ -20,7 +20,7 @@ diagram, headline results plot) and skipping decorative or equation-as-image jun
 Captions are the cheapest, most reliable signal of what a figure actually shows, so
 we extract them alongside the images and let the model match figures to captions.
 """
-import argparse, json, re, subprocess, sys
+import argparse, json, re, shutil, subprocess, sys, tempfile
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -774,6 +774,157 @@ def extract_figures_pymupdf(pdf: Path, figdir: Path, text: str) -> list[dict]:
     return manifest
 
 
+def _canonical_figure_label(value: object) -> str:
+    """Normalize a printed Figure/Fig. label for exact manifest joins."""
+    match = re.fullmatch(r"\s*(?:figure|fig\.?)\s+(\d+)\s*", str(value or ""), re.I)
+    return f"Figure {int(match.group(1))}" if match else ""
+
+
+def fill_pending_pdf_crops(pdf: Path, outdir: Path, text: str) -> int:
+    """Replace only source records explicitly deferred to the PDF crop path.
+
+    TeX captions are first aligned to printed PDF captions by
+    ``sync_figure_captions``.  This function then joins on that explicit
+    ``Figure N`` label; it never assumes that list positions still match after
+    an unresolved source graphic.  Any missing, duplicate, or unaligned label
+    fails closed instead of attaching the wrong crop.
+    """
+    manifest_path = layout.meta_file(outdir, "figures")
+    try:
+        figures = json.loads(manifest_path.read_text())
+    except Exception as exc:
+        raise RuntimeError("source figures manifest is missing or invalid") from exc
+    if not isinstance(figures, list) or not figures:
+        raise RuntimeError("source figures manifest must be a non-empty list")
+
+    pending = [
+        (index, figure)
+        for index, figure in enumerate(figures)
+        if isinstance(figure, dict) and figure.get("source") == "pdf-crop-pending"
+    ]
+
+    claimed_labels: dict[str, int] = {}
+    for index, figure in enumerate(figures):
+        if not isinstance(figure, dict):
+            raise RuntimeError(f"source figures manifest record {index} is invalid")
+        if figure.get("source") == "pdf-crop-pending":
+            continue
+        file_value = str(figure.get("file") or "")
+        file_path = Path(file_value)
+        if not file_value or file_path.is_absolute() or not (outdir / file_path).is_file():
+            raise RuntimeError(f"source figure record {index} has no valid bundle-relative raster")
+        alignment = figure.get("caption_alignment") or {}
+        if pending and alignment.get("status") != "aligned":
+            raise RuntimeError(
+                f"hybrid source figure record {index} did not align uniquely to a printed Figure label"
+            )
+        label = _canonical_figure_label(figure.get("caption_label"))
+        if alignment.get("status") == "aligned" and label:
+            if label in claimed_labels:
+                raise RuntimeError(f"duplicate aligned source figure label: {label}")
+            claimed_labels[label] = index
+
+    if not pending:
+        return 0
+
+    requested: dict[str, tuple[int, dict]] = {}
+    for index, figure in pending:
+        alignment = figure.get("caption_alignment") or {}
+        label = _canonical_figure_label(figure.get("caption_label"))
+        if alignment.get("status") != "aligned" or not label:
+            source_identity = figure.get("source_label") or f"source order {figure.get('source_order', '?')}"
+            raise RuntimeError(
+                f"cannot safely map PDF fallback for {source_identity}: "
+                "TeX caption did not align uniquely to a printed Figure label"
+            )
+        if label in requested:
+            raise RuntimeError(f"duplicate pending PDF fallback label: {label}")
+        if label in claimed_labels:
+            raise RuntimeError(f"pending PDF fallback label already belongs to a source raster: {label}")
+        requested[label] = (index, figure)
+
+    with tempfile.TemporaryDirectory(prefix="paper2assets-pdf-fallback-") as td:
+        temp_figdir = Path(td) / "figures"
+        crops = extract_figures_pymupdf(pdf, temp_figdir, text)
+        crops_by_label: dict[str, dict] = {}
+        duplicate_crop_labels: set[str] = set()
+        for crop in crops:
+            label = _canonical_figure_label(crop.get("caption_label"))
+            if not label:
+                continue
+            if label in crops_by_label:
+                duplicate_crop_labels.add(label)
+            else:
+                crops_by_label[label] = crop
+
+        missing = sorted(label for label in requested if label not in crops_by_label)
+        ambiguous = sorted(label for label in requested if label in duplicate_crop_labels)
+        if missing or ambiguous:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if ambiguous:
+                details.append("duplicate " + ", ".join(ambiguous))
+            raise RuntimeError(
+                "selective PDF fallback could not make an exact Figure-label join: "
+                + "; ".join(details)
+            )
+
+        # Validate every selected raster before mutating the canonical bundle.
+        selected: list[tuple[str, int, dict, dict, Path]] = []
+        for label, (index, pending_record) in requested.items():
+            crop = crops_by_label[label]
+            source_path = temp_figdir / Path(str(crop.get("file") or "")).name
+            if not source_path.is_file():
+                raise RuntimeError(f"selective PDF fallback raster is missing for {label}")
+            selected.append((label, index, pending_record, crop, source_path))
+
+        final_figdir = layout.figures_dir(outdir, create=True)
+        for label, index, pending_record, crop, source_path in selected:
+            target = final_figdir / source_path.name
+            shutil.copy2(source_path, target)
+
+            # Use the PDF crop's physical geometry while retaining the exact
+            # TeX identity/caption that caused this one-record fallback.
+            merged = dict(crop)
+            merged["file"] = f"{layout.FIGURES}/{target.name}"
+            merged["original_label"] = label
+            merged["caption_label"] = label
+            merged["caption"] = pending_record.get("source_caption") or crop.get("caption", "")
+            candidates = list(pending_record.get("caption_candidates") or [])
+            pdf_candidate = {
+                "label": label,
+                "text": str(crop.get("caption") or ""),
+                "source": "pdf-text",
+            }
+            if pdf_candidate not in candidates:
+                candidates.append(pdf_candidate)
+            merged["caption_candidates"] = candidates
+            for key in (
+                "source_label", "source_caption", "source_order",
+                "fallback_reason", "caption_alignment",
+            ):
+                if key in pending_record:
+                    merged[key] = pending_record[key]
+            merged["source"] = "pdf-crop"
+            figures[index] = merged
+
+    temp_manifest: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=manifest_path.parent,
+            prefix=".figures-", suffix=".json.tmp", delete=False,
+        ) as handle:
+            json.dump(figures, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            temp_manifest = Path(handle.name)
+        temp_manifest.replace(manifest_path)
+    finally:
+        if temp_manifest is not None:
+            temp_manifest.unlink(missing_ok=True)
+    return len(pending)
+
+
 def parse_metadata(text: str) -> dict:
     """Best-effort extraction of cover-page metadata from the first ~2 pages.
 
@@ -907,8 +1058,8 @@ def main():
     ap.add_argument("pdf")
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--no-figures", action="store_true",
-                    help="skip figure extraction (write text.txt + captions.json only). "
-                         "Use when source_figures.py already supplied the original figures.")
+                    help="skip full figure extraction (write text.txt + captions.json, then "
+                         "fill only any pdf-crop-pending records left by source_figures.py).")
     args = ap.parse_args()
 
     pdf = Path(args.pdf).resolve()
@@ -962,7 +1113,15 @@ def main():
                 print(f"  backfilled {aligned} source figure caption(s) -> figures.json")
         except Exception as exc:
             print(f"  warning: source figure caption backfill failed: {exc}", file=sys.stderr)
-        print("Skipping figure extraction (--no-figures; original figures supplied by source_figures.py).")
+        try:
+            filled = fill_pending_pdf_crops(pdf, outdir, text)
+        except RuntimeError as exc:
+            print(f"  selective PDF fallback failed: {exc}", file=sys.stderr)
+            raise SystemExit(5) from exc
+        if filled:
+            print(f"  selectively filled {filled} deferred figure(s) from PDF crop")
+        else:
+            print("Skipping figure extraction (--no-figures; no deferred figures remain).")
         return
 
     print("Extracting figures...")

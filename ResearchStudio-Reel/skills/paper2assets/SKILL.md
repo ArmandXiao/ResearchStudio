@@ -48,7 +48,7 @@ Deliverables reference assets with **root-relative** `src` paths -- `assets/figu
    paper.pdf  (+ arXiv id / provided image links)
      │
      ▼  FIGURES — priority: source_figures.py (arXiv source / provided links) → clean assets/figures/*.png + figures.json
-     │           └─ fallback only: extract_pdf.py crops from the rendered PDF
+     │           └─ per-figure fallback: extract_pdf.py crops only unresolved/composite figures from the rendered PDF
      ▼  scripts/extract_pdf.py   → assets/meta/{text.txt, captions.json} (+ figures.json only on the crop fallback; use --no-figures on the source path)
      │
      ▼  Step 3 (model-driven)    → assets/meta/metadata.json
@@ -166,13 +166,14 @@ Writes:
    (downloads `arxiv.org/e-print/<id>`, parses the `.tex` figure order + captions, rasterizes each graphic).
 3. **Backup (ONLY if 1 & 2 don't apply, or `source_figures.py` exits non-zero):** the PDF crop path below — full `extract_pdf.py` (with figures) **+ Step 5 `crop_figure.py`**.
 
-**If `source_figures.py` succeeded (exit 0):** run `extract_pdf.py <pdf> --outdir <outdir> --no-figures` (text.txt + captions.json ONLY) and **SKIP Step 5 (`crop_figure.py`) entirely** — the source graphics are already clean. **Otherwise** run the full `extract_pdf.py <pdf> --outdir <outdir>` (with figures) and do Step 5.
+**If `source_figures.py` succeeded (exit 0):** run `extract_pdf.py <pdf> --outdir <outdir> --no-figures`. It always writes text/captions; when `source_figures.py` left any `source: "pdf-crop-pending"` records, it also aligns their TeX captions to explicit printed `Figure N` labels and fills **only those records** from the rendered PDF. Then run Step 5 only for records whose final `source` is `"pdf-crop"`; skip original source graphics. If there are no such records, skip Step 5 entirely. **Otherwise** run the full `extract_pdf.py <pdf> --outdir <outdir>` (with figures) and do Step 5 for every extracted figure.
 
-`source_figures.py` fails closed on a TeX figure environment containing more
-than one `\\includegraphics`. Selecting only the first child would bind a
-composite caption to an incomplete raster. Its non-zero exit deliberately
-routes the whole paper through the PDF crop fallback, which preserves the
-rendered composite.
+`source_figures.py` never selects only the first child of a multi-file TeX
+figure. It writes that one figure as `pdf-crop-pending` while preserving clean
+arXiv source assets for the other figures. `extract_pdf.py --no-figures`
+replaces the pending record only after a unique TeX-caption → printed
+`Figure N` alignment and an exact label join. Ambiguous or missing mappings
+fail closed instead of falling back to positional order.
 
 **Appendix figures — skipped by DEFAULT.** Process **main-body figures only**. From `text.txt`, find where the appendix / supplementary material begins (the first `Appendix` / `Supplementary` heading, or `A.` / `B.` / `S1`… content after `References`) and note its `\f`-delimited page. **Drop every figure on or after that page** — delete the PNGs from `figures/` and their rows from `figures.json` *before* Step 5, so neither the cleaning loop nor any downstream renderer sees them. **Override only when the user explicitly asks** — e.g. "include the appendix figures" or naming a specific supplementary figure.
 
@@ -259,18 +260,18 @@ Section-by-section guidance:
 
 `Audio script` subfields are full-sentence spoken paragraphs (3–6 sentences each) suitable for TTS. They are part of the spec because audio narration of *any* downstream rendering should be derivable from this single source.
 
-### Step 5 — Clean ALL figure images (mandatory on the crop path — SKIPPED when source figures were used)
+### Step 5 — Clean every PDF-crop figure (original source figures are skipped)
 
-> **Skip this entire step** if Step 2 sourced the ORIGINAL figures via `source_figures.py` (arXiv source bundle or provided image links) — those graphics are already clean. Step 5 runs ONLY on the crop-path fallback (figures cropped from the rendered PDF).
+> Build the worklist from `figures.json`: process every record with `"source": "pdf-crop"` and no record with `"source": "original"`. In a hybrid bundle this may be only one composite figure; in a full crop fallback it is every figure. Skip the entire step only when the worklist is empty.
 
 Step 2 produces raw figure rasters that often carry:
 - A 1–10 px **chrome residue** at the top edge (the bottom of a page rule line / banner / running title that the extractor's column-aware boundary couldn't perfectly avoid).
 - A **baked-in caption strip** at the bottom (rare — `extract_pdf.py` already clamps to `cap_full.y0 - 1`, but a few papers have caption text fused into the figure raster).
 - A uniform **white margin** of arbitrary thickness around the cleaned content (a side effect of the 50 px symmetric pad in Step 2 + caption-clamped tight tops).
 
-Downstream renderers should receive **cleaned** figures, not raw extracts, so we run the deterministic cleanup pipeline on every figure here — independent of which figures any downstream actually picks. Cost is sub-second per figure × 3 commands × N figures = negligible. **Skip this entire step when the figures were pre-supplied** (Step 2's "already supplied?" branch): original source graphics carry none of the chrome / caption-strip / margin defects below.
+Downstream renderers should receive **cleaned PDF crops**, so run the deterministic cleanup pipeline on every `source: "pdf-crop"` record — independent of which figures a downstream renderer picks. Cost is sub-second per crop × 3 commands × N figures. Original source graphics carry none of the chrome / caption-strip / margin defects below and are skipped individually.
 
-**For each `figures/<file>.png`, run 5a → 5b → 5c in this exact order:**
+**For each PDF-crop record's `figures/<file>.png`, run 5a → 5b → 5c in this exact order:**
 
 **5a. `top-check` — strip top chrome residue.**
 
@@ -298,7 +299,7 @@ Strips border rows/cols that are 100% near-white, keeping a `--pad 4` margin. Sa
 
 All three modes write `figures/_debug/<file>.png.bak` (one-shot, never clobbered on re-runs) and update `figures.json` width/height. The top-level `figures/` directory keeps only the in-progress clean PNG — backups and other debug artifacts live in the hidden `_debug/` subdir so downstream consumers see a clean listing.
 
-**5d. Visual AI cropping review (mandatory, runs on every figure).** The deterministic chain in 5a-5c handles uniform white margins, the chrome-residue pattern at the top edge, and the baked-in caption-strip pattern at the bottom edge. It does NOT handle:
+**5d. Visual AI cropping review (mandatory for every PDF-crop figure).** The deterministic chain in 5a-5c handles uniform white margins, the chrome-residue pattern at the top edge, and the baked-in caption-strip pattern at the bottom edge. It does NOT handle:
 
 - **Surrounding column body text leaked into the bbox** — when `extract_pdf.py`'s figure-region detection over-reaches into the paper's prose (a vertical strip of column text running alongside the figure, or a few lines of body paragraph above the figure). This is the most common defect, and it's *invisible* to autotrim/decaption: that text isn't a uniform white margin and isn't a thin caption sliver — it's *real ink* that paints similarly to figure content.
 - **Caption text not caught by `decaption`'s thin-strip pattern** — captions that are tightly butted against the figure body, or captions that span 4+ lines (decaption refuses on caption blocks taller than ~15% of figure height to avoid amputating real figure content).
@@ -555,16 +556,16 @@ paper2assets owns this responsibility because:
 
    **If the visual recheck reveals a structurally impossible crop** (e.g. the figure's y-axis labels share an x-range with a body-text column, so any rectangle that includes the labels also includes the body text), accept the best rectangular crop — the trade-off here is "lose axis labels" vs "include some body text"; the lesser evil depends on which is more visually offensive for downstream renderers. Note the residue in a brief `"note"` field on the figure's entry in `figures.json` so downstream is aware.
 
-**Why this step is mandatory and runs on every figure, not just on picked ones:** paper2assets is the single owner of figure cleanup. Downstream renderers shouldn't re-discover surrounding-column-text or baked-in caption artifacts that the upstream stage left in. The cost (one `blocks` call + 1–3 `mark`/Read iterations + 1 `box` per figure, ~7–20 figures per paper) is paid once here instead of N times across renderers.
+**Why this step is mandatory for every PDF-crop figure, not just picked ones:** paper2assets is the single owner of figure cleanup. Downstream renderers shouldn't re-discover surrounding-column-text or baked-in caption artifacts that the upstream stage left in. Original arXiv/source graphics are already clean and stay untouched.
 
 The `inspect` mode is helpful for quickly probing a figure's outer dimensions and pure-white border before deciding a bbox:
 ```bash
 python ~/.claude/skills/paper2assets/scripts/crop_figure.py inspect <outdir>/assets/figures/<file>.png
 ```
 
-### Step 5e — Final autotrim pass (mandatory, runs on every figure)
+### Step 5e — Final autotrim pass (mandatory for every PDF-crop figure)
 
-**For each `figures/<file>.png`, after 5d has committed its box crop, run autotrim one more time:**
+**For each PDF-crop record's `figures/<file>.png`, after 5d has committed its box crop, run autotrim one more time:**
 
 ```bash
 python ~/.claude/skills/paper2assets/scripts/crop_figure.py autotrim <outdir>/assets/figures/<file>.png
@@ -723,7 +724,7 @@ scripts/
 
 ## Key rules
 
-- **Step 5 runs on every figure, not just suspected ones.** Cost is trivial; missing chrome / trapped margins / surrounding paper text downstream is expensive.
+- **Step 5 runs on every `source: "pdf-crop"` figure, not just suspected ones; it never rewrites `source: "original"` assets.** Cost is trivial; missing chrome / trapped margins / surrounding paper text downstream is expensive.
 - **Step 5 ordering is non-negotiable.** top-check → decaption → autotrim → visual AI review (5d) → final autotrim mop-up (5e). 5d sits in the middle because the deterministic chain in 5a-5c handles the easy patterns first; 5d catches what the patterns can't (column body text leakage, asymmetric noise, captions outside decaption's thin-strip pattern). 5e closes the loop by re-running the cheap autotrim after 5d's visually-judged bbox commits — visual judgment leaves pixel-level whitespace residues even when the bbox looks tight, and 5e is the safe deterministic mop-up that ensures saved PNG dimensions match figure content extent.
 - **Main caption out, sub-captions in.** The paper's "Figure N: …" caption is already in `captions.json` as structured text — if you see that line at the bottom of a figure raster, CUT IT in 5d. **Panel sub-captions** like "(a) Pipeline overview" / "(b) Loss curves" stay — they label the sub-panels and are part of the figure's visual content; cutting them strips the figure of its own labels. Rule of thumb at the bottom edge: 1–3 short prose rows starting with "Figure N:" → CUT; short "(a)/(b)/(c) <label>" rows pinned right under each sub-panel → KEEP.
 - **Surrounding column body text never lives inside the figure raster either.** A vertical strip of paper prose alongside the figure, or a few lines of body paragraph above/below — all noise. 5d's per-edge check catches them; act on what you can describe in words.

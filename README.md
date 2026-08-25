@@ -19,7 +19,7 @@ The skills run on [Claude Code](https://docs.claude.com/en/docs/claude-code/over
 
 <div align="center">
 
-#### [📄 Paper](https://arxiv.org/abs/2607.04438) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Reel/) &nbsp;·&nbsp; [🎬 Demo](https://researchstudio.site/?tool=poster)
+#### [📄 Paper](https://arxiv.org/abs/2607.04438) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Reel/) &nbsp;·&nbsp; [🎬 Demo](https://microsoft.github.io/ResearchStudio/reel-page/)
 
 </div>
 
@@ -34,7 +34,7 @@ The skills run on [Claude Code](https://docs.claude.com/en/docs/claude-code/over
 
 <div align="center">
 
-#### [📄 Paper](https://arxiv.org/abs/2607.04439) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Idea/) &nbsp;·&nbsp; [🎬 Demo](https://researchstudio.site/?tool=idea)
+#### [📄 Paper](https://arxiv.org/abs/2607.04439) &nbsp;·&nbsp; [💻 Code](ResearchStudio-Idea/) &nbsp;·&nbsp; [🎬 Demo](https://microsoft.github.io/ResearchStudio/idea-page/)
 
 </div>
 
@@ -47,8 +47,7 @@ The skills run on [Claude Code](https://docs.claude.com/en/docs/claude-code/over
 
 ## News 🔥🔥🔥
 
-- [**2026-08-13**] `feature` **[IdeaSpark](ResearchStudio-Idea/) hands a dead end to the next attempt** — an abandoned candidate now carries what passing would take: the condition any mechanism there needs, what is ruled out, and what to salvage.
-- [**2026-08-13**] `fix` **[IdeaSpark](ResearchStudio-Idea/) audit guards can no longer stall a run** — the re-check loops are bounded, and findings no compliant audit cleared route into the normal retry instead of repeating forever.
+- [**2026-08-25**] `release` **[Trending Paper](https://microsoft.github.io/ResearchStudio/trending-paper) is released** — meet the trending research through ResearchStudio Reels.
 - [**2026-08-13**] `feature` **[IdeaSpark](ResearchStudio-Idea/) keeps the whole user query** — the user query is persisted verbatim and read by every phase that reasons about intent; papers named in it without a link are resolved and deep-read; and a stated solution direction reaches idea selection, which must record whether it followed or departed from that direction, and why.
 - [**2026-07-08**] `release` **[ResearchStudio-Reel](ResearchStudio-Reel/) is released** — the *post-paper* half: turn a finished paper PDF into the artifacts a publication needs — a print-ready poster, a narrated walkthrough video, a bilingual blog post, and an interactive reel viewer.
 - [**2026-07-03**] `release` **[ResearchStudio-Idea](ResearchStudio-Idea/) is released** — the *pre-paper* half: turn an under-specified research direction into a reviewer-defensible, implementable idea, grounded in an empirical taxonomy induced from a large-scale corpus of ICLR / ICML / NeurIPS submissions.
@@ -68,7 +67,9 @@ conda activate researchstudio
 
 ```bash
 uv venv --python 3.10
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
+# For Windows PowerShell:
+# .venv\Scripts\Activate.ps1
 ```
 
 Then pick one of the two install paths below:

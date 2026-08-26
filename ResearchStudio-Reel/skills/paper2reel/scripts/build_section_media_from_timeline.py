@@ -5,8 +5,7 @@ This script keeps an existing section-modal reel bundle but replaces
 its fragile time-window guesses with the canonical paper2video timeline. It
 updates content_alignment.json, refreshes the inline ALIGNMENT constant in
 reel.html, rebuilds complete slide clips, composes section clips from
-those slide clips, appends a short silent freeze tail, and crops VTT subtitles
-from the full-paper VTT using the same timeline windows.
+those slide clips, and appends a short silent freeze tail.
 """
 
 from __future__ import annotations
@@ -413,7 +412,7 @@ def main() -> int:
     parser.add_argument("--viewer-dir", required=True, type=Path)
     parser.add_argument("--timeline", required=True, type=Path)
     parser.add_argument("--video", required=True, type=Path,
-                        help="No-subtitle MP4, normally <video_outdir>/video_no_subtitles.mp4.")
+                        help="Playback MP4, normally the final <video_outdir>/video.mp4.")
     parser.add_argument("--captions-vtt", type=Path)
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--section-tail-seconds", type=float, default=0.9,
@@ -421,7 +420,7 @@ def main() -> int:
     parser.add_argument("--skip-media", action="store_true",
                         help="Only update content_alignment.json and reel.html.")
     parser.add_argument("--allow-burned-subtitle-video", action="store_true",
-                        help="Allow <video_outdir>/video.mp4 as the reel video source. This can duplicate subtitles when CC is enabled.")
+                        help="Use a final MP4 with baked Bottom Bar subtitles and do not expose sidecar captions.")
     args = parser.parse_args()
 
     viewer_dir = args.viewer_dir.resolve()
@@ -448,17 +447,18 @@ def main() -> int:
     if looks_like_burned_final_video(video_path) and not args.allow_burned_subtitle_video:
         no_subtitle_candidate = video_path.with_name("video_no_subtitles.mp4")
         sys.exit(
-            "[timeline_media] refusing the burned-in subtitle video.mp4 as reel video source. "
-            "paper2reel already provides toggleable VTT captions, so using the burned-in final MP4 "
-            "can show duplicate subtitles. Use "
-            f"{no_subtitle_candidate} for --video, or pass --allow-burned-subtitle-video only for a user-approved degraded run."
+            "[timeline_media] final video.mp4 requires --allow-burned-subtitle-video "
+            "so paper2reel records baked Bottom Bar delivery and disables its sidecar caption layer. "
+            f"Pass that flag, or use {no_subtitle_candidate} for the legacy sidecar-caption path."
         )
     artifacts = alignment.setdefault("artifacts", {})
     if isinstance(artifacts, dict):
         artifacts["video"] = f"{MEDIA_DIR}/video.mp4"
-        artifacts["video_source_kind"] = "raw_pre_subtitle" if not args.allow_burned_subtitle_video else "burned_subtitle_override"
-        artifacts["caption_delivery"] = "sidecar_vtt_toggle"
-        if args.captions_vtt:
+        artifacts["video_source_kind"] = "burned_bottom_bar" if args.allow_burned_subtitle_video else "raw_pre_subtitle"
+        artifacts["caption_delivery"] = "burned_bottom_bar" if args.allow_burned_subtitle_video else "sidecar_vtt_toggle"
+        if args.allow_burned_subtitle_video:
+            artifacts.pop("captions", None)
+        elif args.captions_vtt:
             artifacts["captions"] = f"{MEDIA_DIR}/captions/video.vtt"
 
     for sec in alignment["sections"]:
@@ -472,7 +472,9 @@ def main() -> int:
             sec["slide_indices"] = all_slide_indices
             ensure_slide_targets(sec, all_slide_indices, alignment_slides)
             sec["clip"] = f"{MEDIA_DIR}/clips/title.mp4"
-            if args.captions_vtt:
+            if args.allow_burned_subtitle_video:
+                sec.pop("captions", None)
+            elif args.captions_vtt:
                 sec["captions"] = f"{MEDIA_DIR}/captions/clips/title.vtt"
             sec["clip_seconds"] = round(end - start, 3)
             sec["slide_segments"] = build_slide_segments(slides_by_index, all_slide_indices, start)
@@ -487,7 +489,9 @@ def main() -> int:
         sec["slide_indices"] = indices
         ensure_slide_targets(sec, indices, alignment_slides)
         sec["clip"] = f"{MEDIA_DIR}/clips/{sid}.mp4"
-        if args.captions_vtt:
+        if args.allow_burned_subtitle_video:
+            sec.pop("captions", None)
+        elif args.captions_vtt:
             sec["captions"] = f"{MEDIA_DIR}/captions/clips/{sid}.vtt"
         sec["source_clip_seconds"] = round(end - start, 3)
         sec["natural_tail_seconds"] = max(0.0, round(args.section_tail_seconds, 3))
@@ -511,7 +515,8 @@ def main() -> int:
     if not args.skip_media:
         media_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(video_path, media_dir / "video.mp4")
-        cues = read_vtt(args.captions_vtt.resolve() if args.captions_vtt else None)
+        caption_path = None if args.allow_burned_subtitle_video else args.captions_vtt
+        cues = read_vtt(caption_path.resolve() if caption_path else None)
         if cues:
             crop_vtt(cues, 0.0, float(timeline.get("actual_seconds") or 0.0), media_dir / "captions" / "video.vtt")
         for idx, slide in slides_by_index.items():

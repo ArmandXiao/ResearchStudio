@@ -77,7 +77,7 @@ a:hover{text-decoration:underline;text-underline-offset:3px}
 .brand img{display:inline-flex}
 .nav-links{display:flex;align-items:center;gap:22px;list-style:none;margin:0 0 0 16px;padding:0;flex:1}
 .nav-links li{display:inline-flex}
-.nav-links a{color:var(--fg-muted);font-size:14.5px;font-weight:500;padding:0;transition:color .15s ease}
+.nav-links a{color:var(--fg-muted);font-size:14.5px;font-weight:500;padding:0;white-space:nowrap;transition:color .15s ease}
 .nav-links a:hover{color:var(--fg);text-decoration:none}
 .nav-links a.active{color:var(--brand-2);font-weight:500}
 .nav__cta{margin-left:auto;display:flex;align-items:center;gap:10px}
@@ -243,7 +243,7 @@ main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;fle
 .footer-links a{color:var(--fg-muted)} .footer-links a:hover{color:var(--fg)}
 
 @media (max-width:1540px){.topbar{padding-right:clamp(24px,calc(776px - 50vw),190px)}}
-@media (max-width:820px){.nav-links{display:none}}
+@media (max-width:1024px){.nav-links{display:none}}
 @media (max-width:760px){
   .topbar{padding-right:140px}
   .page-controls{top:14px;right:16px;gap:6px}
@@ -290,14 +290,15 @@ main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;fle
 </div>
 
 <div class="topbar-wrap">
-  <nav class="topbar">
+  <nav class="topbar" aria-label="Primary navigation">
     <a class="brand" href="../">
       <img src="assets/logo.svg" alt="" width="28" height="28"/>
       <span>ResearchStudio</span>
     </a>
     <ul class="nav-links">
       <li><a href="../idea-page/"><span data-i18n="nav_idea">Explore Idea</span></a></li>
-      <li><a class="active" href="#top"><span data-i18n="nav_reel">Explore Reel</span></a></li>
+      <li><a class="active" href="#top" aria-current="page"><span data-i18n="nav_reel">Explore Reel</span></a></li>
+      <li><a href="../trending-paper/"><span data-i18n="nav_trending">Trending Paper</span></a></li>
     </ul>
     <div class="nav__cta">
       <a class="btn btn--ghost" href="https://github.com/microsoft/ResearchStudio" target="_blank" rel="noopener">
@@ -429,7 +430,7 @@ main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;fle
   const copy = {
     en: {
       title: 'ResearchStudio-Reel Gallery',
-      nav_idea: 'Explore Idea', nav_reel: 'Explore Reel', github: 'Open on GitHub',
+      nav_idea: 'Explore Idea', nav_reel: 'Explore Reel', nav_trending: 'Trending Paper', github: 'Open on GitHub',
       theme_label: 'Theme', theme_light: 'Light', theme_dark: 'Dark',
       language_label: 'Language', language_en: 'English', language_zh: 'Chinese', language_es: 'Spanish',
       hero_t1: 'One paper in.', hero_t2: 'A poster, a video, a blog out.', demo_badge: 'Live demo', demo_h: 'Make your own poster', demo_sub: 'Turn any paper into a unified artifact — try it now',
@@ -458,7 +459,7 @@ main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;fle
     },
     zh: {
       title: 'ResearchStudio-Reel 画廊',
-      nav_idea: '探索 Idea', nav_reel: '探索 Reel', github: '在 GitHub 查看',
+      nav_idea: '探索 Idea', nav_reel: '探索 Reel', nav_trending: '热门论文', github: '在 GitHub 查看',
       theme_label: '主题', theme_light: '浅色', theme_dark: '深色',
       language_label: '语言', language_en: '英语', language_zh: '中文', language_es: '西班牙语',
       hero_t1: '一篇论文进,', hero_t2: '海报、视频、博客同时产出。', demo_badge: '在线体验', demo_h: '生成你的海报', demo_sub: '把任意论文变成海报,立即试用',
@@ -487,7 +488,7 @@ main{max-width:var(--max);margin:-48px auto 0;padding:10px 0 10px;width:100%;fle
     },
     es: {
       title: 'Galería ResearchStudio-Reel',
-      nav_idea: 'Explorar Idea', nav_reel: 'Explorar Reel', github: 'Ver en GitHub',
+      nav_idea: 'Explorar Idea', nav_reel: 'Explorar Reel', nav_trending: 'Artículos en tendencia', github: 'Ver en GitHub',
       theme_label: 'Tema', theme_light: 'Claro', theme_dark: 'Oscuro',
       language_label: 'Idioma', language_en: 'Inglés', language_zh: 'Chino', language_es: 'Español',
       hero_t1: 'Un artículo entra.', hero_t2: 'Un póster, un vídeo y un blog salen.', demo_badge: 'Demo en vivo', demo_h: 'Crea tu propio póster', demo_sub: 'Convierte cualquier artículo en uno — pruébalo ahora',

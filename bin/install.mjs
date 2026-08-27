@@ -163,12 +163,23 @@ function fetchDependencySkills(skillsDir) {
     try {
       execFileSync('npx', ['-y', 'skills', 'add', d.repo, '--skill', d.name],
         { cwd: skillsDir, stdio: 'inherit' });
+      // `skills add` drops content under <skillsDir>/.agents/skills/<name>
+      // rather than the top level where the Reel/Idea skills live. Move it up
+      // to the top level so the agent's top-level scan finds it.
+      const src = path.join(skillsDir, '.agents', 'skills', d.name);
+      const dst = path.join(skillsDir, d.name);
+      if (fs.existsSync(src)) {
+        fs.rmSync(dst, { recursive: true, force: true });
+        fs.renameSync(src, dst);
+      }
       added.push(d.name);
     } catch {
       say(`  ${C.y}! failed to fetch ${d.name} via npx skills add — install it manually:${C.r}`);
       say(`    ${C.c}npx skills add ${d.repo} --skill ${d.name}${C.r}`);
     }
   }
+  // Remove the now-empty .agents scaffold left by `skills add`.
+  fs.rmSync(path.join(skillsDir, '.agents'), { recursive: true, force: true });
   return added;
 }
 

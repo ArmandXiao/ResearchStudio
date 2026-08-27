@@ -413,6 +413,19 @@ if [ "$USE_REEL" = 1 ]; then
         && npx -y skills add hugohe3/ppt-master --skill ppt-master \
         && npx -y skills add ai-nuts/pptx2video --skill pptx2video ) \
         || warn "npx skills add failed for ppt-master/pptx2video — install them manually; paper2video will not work until then"
+
+      # `skills add` drops the skill content under <target>/.agents/skills/<name>
+      # (its own project layout) rather than the skills-dir top level where the
+      # Reel/Idea skills live. Move each up to the top level so the agent's
+      # top-level scan finds them next to the other skills.
+      for dep_name in ppt-master pptx2video; do
+        dep_src="$target_dir/.agents/skills/$dep_name"
+        if [ -d "$dep_src" ]; then
+          rm -rf "$target_dir/$dep_name"
+          mv "$dep_src" "$target_dir/$dep_name"
+        fi
+      done
+      rmdir "$target_dir/.agents/skills" "$target_dir/.agents" 2>/dev/null || true
     done
   else
     warn "npx not found — install ppt-master + pptx2video manually:"

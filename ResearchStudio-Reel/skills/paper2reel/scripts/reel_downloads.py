@@ -18,8 +18,15 @@ from typing import Any, Iterable
 
 DOWNLOAD_SCHEMA_VERSION = "paper2reel.downloads.v1"
 DOWNLOAD_ALL_PACKAGE_VERSION = "paper2reel.all.v2"
+DOWNLOAD_VIDEO_PACKAGE_VERSION = "paper2reel.video.v2"
 DOWNLOAD_MANIFEST_PATH = Path("assets/meta/reel_downloads.json")
 DOWNLOAD_DELIVERIES = {"materialized", "on_demand"}
+VIDEO_README_NAME = "README.txt"
+VIDEO_README_TEXT = (
+    "Convert edited PPTX file into video using the PPTX2Video project. "
+    "Project link: https://github.com/ai-nuts/pptx2video"
+)
+VIDEO_README_BYTES = (VIDEO_README_TEXT + "\n").encode("utf-8")
 ARCHIVE_ORDER = ("all", "poster", "video", "blog")
 ARCHIVE_META = {
     "all": {"label": "All", "filename": "all_final.zip"},
@@ -39,7 +46,7 @@ MODULE_FILES: dict[str, dict[str, set[str]]] = {
         },
     },
     "video": {
-        "files": {"video.mp4", "video.pptx"},
+        "files": {"video.mp4", "video.pptx", VIDEO_README_NAME},
         "directories": {"assets/captions"},
     },
     "blog": {
@@ -54,10 +61,23 @@ ALL_PACKAGE_ROOT_FILES = {
     "poster.pptx",
     "video.mp4",
     "video.pptx",
+    VIDEO_README_NAME,
     "blog_en.docx",
     "blog_zh.docx",
 }
-ALL_PACKAGE_REQUIRED_FILES = set(ALL_PACKAGE_ROOT_FILES)
+# README.txt was added after the v2 All-package contract shipped. Keep it
+# optional at this layer so historical v2 manifests remain downloadable; new
+# video-package manifests require and validate it separately below.
+ALL_PACKAGE_REQUIRED_FILES = {
+    "reel.html",
+    "content_alignment.json",
+    "poster.pdf",
+    "poster.pptx",
+    "video.mp4",
+    "video.pptx",
+    "blog_en.docx",
+    "blog_zh.docx",
+}
 ALL_PACKAGE_RUNTIME_DIRECTORIES = {
     "assets/poster",
     "assets/media",
@@ -79,7 +99,7 @@ ALL_PACKAGE_EXCLUDED_PARTS = {
 }
 ALL_PACKAGE_MODULE_FILES = {
     "poster": {"poster.pdf", "poster.pptx"},
-    "video": {"video.mp4", "video.pptx"},
+    "video": {"video.mp4", "video.pptx", VIDEO_README_NAME},
     "blog": {"blog_en.docx", "blog_zh.docx"},
 }
 PROHIBITED_PARTS = {
@@ -97,6 +117,25 @@ PROHIBITED_PARTS = {
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def ensure_video_readme(video_source: Path) -> Path:
+    """Write the deterministic PPTX2Video handoff note into a video bundle."""
+    source = Path(video_source).resolve()
+    if not source.is_dir():
+        raise ValueError(f"video download source is not a directory: {source}")
+    destination = source / VIDEO_README_NAME
+    if destination.is_symlink():
+        raise ValueError(f"video README may not be a symlink: {destination}")
+    if destination.exists() and not destination.is_file():
+        raise ValueError(f"video README must be a regular file: {destination}")
+    try:
+        if destination.is_file() and destination.read_bytes() == VIDEO_README_BYTES:
+            return destination
+        destination.write_bytes(VIDEO_README_BYTES)
+    except OSError as exc:
+        raise ValueError(f"could not write video README: {destination}") from exc
+    return destination
 
 
 def is_backup_name(name: str) -> bool:
@@ -358,6 +397,13 @@ def build_download_manifest(
         "created_at": utc_now(),
         "archives": archives,
     }
+    video_source = sources.get("video")
+    if (
+        video_source is not None
+        and (video_source / VIDEO_README_NAME).is_file()
+        and (video_source / VIDEO_README_NAME).read_bytes() == VIDEO_README_BYTES
+    ):
+        payload["video_package_version"] = DOWNLOAD_VIDEO_PACKAGE_VERSION
     if has_reel_runtime:
         payload["all_package_version"] = DOWNLOAD_ALL_PACKAGE_VERSION
     return payload
@@ -413,6 +459,16 @@ def validate_download_manifest(
                 f"all_package_version must be {DOWNLOAD_ALL_PACKAGE_VERSION} when present.",
                 path="all_package_version",
                 data={"actual": all_package_version},
+            )
+        )
+    video_package_version = payload.get("video_package_version")
+    if video_package_version not in {None, DOWNLOAD_VIDEO_PACKAGE_VERSION}:
+        issues.append(
+            _issue(
+                "DOWNLOAD_VIDEO_PACKAGE_VERSION_INVALID",
+                f"video_package_version must be {DOWNLOAD_VIDEO_PACKAGE_VERSION} when present.",
+                path="video_package_version",
+                data={"actual": video_package_version},
             )
         )
     delivery = payload.get("delivery")
@@ -669,6 +725,45 @@ def validate_download_manifest(
                             "DOWNLOAD_ALL_PACKAGE_INVALID",
                             "Download All must exactly match the self-contained Reel package selected from the final bundle.",
                             path="archives.all.files",
+                        )
+                    )
+        if video_package_version == DOWNLOAD_VIDEO_PACKAGE_VERSION:
+            expected_readme = (
+                VIDEO_README_NAME,
+                VIDEO_README_NAME,
+                len(VIDEO_README_BYTES),
+            )
+            if expected_readme not in normalized["video"]:
+                issues.append(
+                    _issue(
+                        "DOWNLOAD_VIDEO_README_MISSING",
+                        "The Video archive must contain the canonical root README.txt.",
+                        path="archives.video.files",
+                    )
+                )
+            if (
+                all_package_version == DOWNLOAD_ALL_PACKAGE_VERSION
+                and expected_readme not in normalized["all"]
+            ):
+                issues.append(
+                    _issue(
+                        "DOWNLOAD_ALL_VIDEO_README_MISSING",
+                        "Download All must contain the canonical root README.txt for the Video source.",
+                        path="archives.all.files",
+                    )
+                )
+            if require_sources:
+                readme_path = bundle_root / VIDEO_README_NAME
+                try:
+                    readme_bytes = readme_path.read_bytes()
+                except OSError:
+                    readme_bytes = None
+                if readme_bytes is not None and readme_bytes != VIDEO_README_BYTES:
+                    issues.append(
+                        _issue(
+                            "DOWNLOAD_VIDEO_README_CONTENT_INVALID",
+                            "README.txt must contain the canonical PPTX2Video handoff text.",
+                            path=VIDEO_README_NAME,
                         )
                     )
     return issues

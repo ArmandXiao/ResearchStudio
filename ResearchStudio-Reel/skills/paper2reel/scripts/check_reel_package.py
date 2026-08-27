@@ -36,6 +36,9 @@ from reel_downloads import (  # noqa: E402
     ARCHIVE_META,
     ARCHIVE_ORDER,
     DOWNLOAD_MANIFEST_PATH,
+    DOWNLOAD_VIDEO_PACKAGE_VERSION,
+    VIDEO_README_BYTES,
+    VIDEO_README_NAME,
     validate_download_manifest,
 )
 
@@ -353,6 +356,7 @@ def archive_sha256(path: Path) -> str:
 def validate_download_archives(
     findings: list[dict[str, Any]],
     viewer_dir: Path,
+    manifest: dict[str, Any] | None = None,
 ) -> None:
     """Validate the four user-facing archives produced by paper2reel."""
     downloads_dir = viewer_dir / "assets" / "downloads"
@@ -362,6 +366,7 @@ def validate_download_archives(
     }
     names: dict[str, set[str]] = {}
     valid_paths: dict[str, Path] = {}
+    video_readme: bytes | None = None
     for module, path in paths.items():
         if not path.is_file():
             add_finding(
@@ -379,6 +384,8 @@ def validate_download_archives(
                 bad_file = archive.testzip()
                 if bad_file:
                     raise zipfile.BadZipFile(f"CRC failure in {bad_file}")
+                if module == "video" and VIDEO_README_NAME in archive_names:
+                    video_readme = archive.read(VIDEO_README_NAME)
         except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
             add_finding(
                 findings,
@@ -411,6 +418,28 @@ def validate_download_archives(
             )
         names[module] = set(archive_names)
         valid_paths[module] = path
+
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("video_package_version")
+        == DOWNLOAD_VIDEO_PACKAGE_VERSION
+    ):
+        if VIDEO_README_NAME not in names.get("video", set()):
+            add_finding(
+                findings,
+                "ERROR",
+                "DOWNLOAD_VIDEO_README_MISSING",
+                "The Video archive is missing its root README.txt.",
+                path=rel(paths["video"], viewer_dir),
+            )
+        elif video_readme != VIDEO_README_BYTES:
+            add_finding(
+                findings,
+                "ERROR",
+                "DOWNLOAD_VIDEO_README_CONTENT_INVALID",
+                "The Video archive README.txt has unexpected content.",
+                path=rel(paths["video"], viewer_dir),
+            )
 
     module_names = ("poster", "video", "blog")
     if all(module in valid_paths for module in module_names):
@@ -496,7 +525,7 @@ def validate_download_contract(
         return None
     delivery = payload.get("delivery")
     if delivery == "materialized":
-        validate_download_archives(findings, viewer_dir)
+        validate_download_archives(findings, viewer_dir, payload)
     elif delivery == "on_demand":
         downloads_dir = viewer_dir / "assets" / "downloads"
         stale_archives = (

@@ -181,8 +181,11 @@ Download delivery has two explicit modes:
   opening hides these online-only links.
 
 Both modes exclude `.claude/`, nested download directories, backups, and
-internal files. Poster, Video, and Blog keep their existing module-specific
-contents. New manifests mark `all_package_version: paper2reel.all.v2`; their
+internal files. The Video archive contains `video.pptx`, `video.mp4`, optional
+caption sidecars, and a root `README.txt` pointing editors to PPTX2Video.
+Historical manifests without that README remain valid; download servers inject
+the canonical note into `video_final.zip` without rewriting the old bundle.
+New manifests mark `all_package_version: paper2reel.all.v2`; their
 All archive is instead a self-contained offline Reel containing `reel.html`,
 `content_alignment.json`, the Reel runtime under `assets/poster`,
 `assets/media`, `assets/slides`, `assets/blog`, `assets/ui`, and `assets/fonts`,

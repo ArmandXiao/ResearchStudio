@@ -22,7 +22,12 @@ import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
-from reel_downloads import archive_files, read_download_manifest
+from reel_downloads import (
+    VIDEO_README_BYTES,
+    VIDEO_README_NAME,
+    archive_files,
+    read_download_manifest,
+)
 
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -76,6 +81,11 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
             ) as archive:
                 for source, arcname in files:
                     archive.write(source, arcname)
+                if kind == "video" and not any(
+                    arcname.casefold() == VIDEO_README_NAME.casefold()
+                    for _source, arcname in files
+                ):
+                    archive.writestr(VIDEO_README_NAME, VIDEO_README_BYTES)
             size = stream.tell()
             stream.seek(0)
             self.send_response(http.HTTPStatus.OK)

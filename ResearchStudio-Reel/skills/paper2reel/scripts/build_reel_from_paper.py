@@ -23,6 +23,7 @@ from typing import Any
 from reel_downloads import (
     DOWNLOAD_MANIFEST_PATH,
     build_download_manifest,
+    ensure_video_readme,
     materialize_download_archives,
     validate_download_manifest,
     write_download_manifest,
@@ -420,6 +421,7 @@ def sync_reel_into_bundle(
     meta_dir = target_assets / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(staging_dir / "manifest.json", meta_dir / "reel_manifest.json")
+    ensure_video_readme(target_dir)
     download_manifest = build_download_manifest(
         bundle_root=target_dir,
         poster_source=target_dir,

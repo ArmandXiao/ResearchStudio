@@ -31,6 +31,7 @@ from reel_downloads import (
     DOWNLOAD_MANIFEST_PATH,
     archive_links,
     build_download_manifest,
+    ensure_video_readme,
     selected_all_package_files,
     selected_files,
     validate_download_manifest,
@@ -2347,6 +2348,8 @@ def build_downloads(
         for module, source in sources.items()
         if source is not None and source.is_dir()
     }
+    if "video" in available:
+        ensure_video_readme(available["video"])
     resolved_sources = set(available.values())
     if download_mode == "materialized" or len(resolved_sources) != 1:
         manifest_root = outdir.resolve()

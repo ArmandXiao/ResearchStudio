@@ -41,6 +41,8 @@ export EDITOR="${EDITOR:-vim}"
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IDEA_REPO="${REPO_ROOT}/ResearchStudio-Idea"
 REEL_REPO="${REPO_ROOT}/ResearchStudio-Reel"
+# Vendored dependency skills (ppt-master, pptx2video) that Paper2Video delegates to.
+DEPS_DIR="${REPO_ROOT}/dependencies"
 
 CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$REPO_ROOT/.claude/skills}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$REPO_ROOT/.codex/skills}"
@@ -399,6 +401,25 @@ if [ "$USE_REEL" = 1 ]; then
     skill_name="$(basename "${skill_dir%/}")"
     link_skill "${skill_dir%/}" "$skill_name"
   done
+
+  # Paper2Video delegates deck authoring to ppt-master and rendering/QA to
+  # pptx2video. Both ship as vendored dependency skills under dependencies/;
+  # link them alongside the Reel skills so paper2video works out of the box.
+  log "Linking Paper2Video dependency skills (ppt-master, pptx2video)"
+  for dep_dir in "$DEPS_DIR"/*/; do
+    [ -d "$dep_dir" ] || continue
+    dep_name="$(basename "${dep_dir%/}")"
+    link_skill "${dep_dir%/}" "$dep_name"
+  done
+
+  # ppt-master's tools have optional Python deps (python-pptx, PyYAML, …);
+  # install them best-effort. pptx2video is a separate pip runtime the user
+  # installs from ai-nuts/pptx2video (see paper2video/README.md).
+  if [ -f "$DEPS_DIR/ppt-master/requirements.txt" ]; then
+    log "Python dependencies (ppt-master requirements)"
+    pip_install -r "$DEPS_DIR/ppt-master/requirements.txt" \
+      || warn "ppt-master requirements failed — some ppt-master tools may degrade; install manually if needed"
+  fi
   echo
 fi
 
@@ -429,9 +450,9 @@ if [ "$USE_REEL" = 1 ]; then
   echo
   echo "  Reel notes:"
   echo "    • Export ANTHROPIC_API_KEY (or your backend's key) in your shell."
-  echo "    • Paper2Video also needs the standalone 'ppt-master' skill:"
-  echo "        /plugin marketplace add hugohe3/ppt-master"
-  echo "        /plugin install ppt-master@ppt-master"
+  echo "    • Paper2Video's 'ppt-master' + 'pptx2video' skills were linked from dependencies/."
+  echo "    • pptx2video also needs its pip runtime (see ResearchStudio-Reel/skills/paper2video/README.md):"
+  echo "        pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'"
 fi
 if [ "$USE_IDEA" = 1 ]; then
   echo

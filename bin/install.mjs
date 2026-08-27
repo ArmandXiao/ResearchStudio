@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DEPS_DIR = path.join(PKG_DIR, 'dependencies');
 const AGENTS = { claude: '.claude', codex: '.codex' };
 const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 
@@ -149,6 +150,30 @@ function installSkills(skillsDir, srcDir, names) {
   }
 }
 
+// Paper2Video delegates deck authoring to ppt-master and rendering/QA to
+// pptx2video. Both ship as vendored dependency skills under dependencies/.
+// Symlink them (rather than copy) so they track the repo checkout, matching
+// install.sh. Returns the names that were linked.
+function linkDependencySkills(skillsDir, depsDir) {
+  if (!fs.existsSync(depsDir)) return [];
+  fs.mkdirSync(skillsDir, { recursive: true });
+  const linked = [];
+  for (const d of fs.readdirSync(depsDir, { withFileTypes: true })) {
+    const src = path.join(depsDir, d.name);
+    if (!d.isDirectory() || !fs.existsSync(path.join(src, 'SKILL.md'))) continue;
+    const dst = path.join(skillsDir, d.name);
+    fs.rmSync(dst, { recursive: true, force: true });
+    try {
+      fs.symlinkSync(src, dst, 'dir');
+    } catch {
+      // Symlinks can fail (e.g. Windows without privilege) — fall back to copy.
+      fs.cpSync(src, dst, { recursive: true });
+    }
+    linked.push(d.name);
+  }
+  return linked;
+}
+
 function commandWorks(command, args) {
   try {
     execFileSync(command, args, { stdio: 'ignore' });
@@ -248,10 +273,16 @@ async function main() {
 
   // install
   say('');
+  const reelSelected = selected.some((p) => p.key === 'reel');
   for (const dir of targets) {
     for (const p of selected) installSkills(dir, p.src, p.skills);
     const total = selected.reduce((n, p) => n + p.skills.length, 0);
     say(`${C.g}✓${C.r} installed ${total} skills (${selected.map((p) => p.key).join(', ')}) → ${C.c}${dir}${C.r}`);
+    // Paper2Video needs its vendored dependency skills (ppt-master, pptx2video).
+    if (reelSelected) {
+      const deps = linkDependencySkills(dir, DEPS_DIR);
+      if (deps.length) say(`  ${C.g}✓${C.r} linked ${deps.length} Paper2Video dep skill(s) (${deps.join(', ')}) → ${C.c}${dir}${C.r}`);
+    }
     const w = writeEnv(dir, values);
     if (w) say(`  ${C.g}✓${C.r} wrote ${Object.keys(values).length} key(s) → ${w.envPath}${w.backedUp ? `  ${C.d}(backup: .env.bak)${C.r}` : ''}`);
   }
@@ -282,6 +313,8 @@ async function main() {
     say(`  sudo apt-get install -y poppler-utils libreoffice ffmpeg`);
     say(`  ${C.c}# Chromium for Paper2Poster HTML→PDF/PNG (~300 MB download)${C.r}`);
     say(`  ${PYTHON} -m playwright install chromium`);
+    say(`  ${C.c}# pptx2video pip runtime for Paper2Video (skill was linked from dependencies/)${C.r}`);
+    say(`  ${PYTHON} -m pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'`);
   }
   say('');
   process.exit(0);

@@ -1,7 +1,7 @@
 {
   "name": "researchstudio",
   "version": "1.0.0",
-  "description": "ResearchStudio installer — interactively install the ResearchStudio-Idea skills and write the connector .env. Run: npx github:microsoft/ResearchStudio",
+  "description": "ResearchStudio installer — interactively install the ResearchStudio-Idea and ResearchStudio-Reel skills (with Paper2Video dependency skills) and write the connector .env. Run: npx github:microsoft/ResearchStudio",
   "type": "module",
   "bin": {
     "researchstudio": "bin/install.mjs"
@@ -18,6 +18,6 @@
   "files": [
     "bin/",
     "ResearchStudio-Idea/",
-    "dependencies/"
+    "ResearchStudio-Reel/"
   ]
 }

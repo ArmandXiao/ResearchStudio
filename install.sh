@@ -41,8 +41,6 @@ export EDITOR="${EDITOR:-vim}"
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IDEA_REPO="${REPO_ROOT}/ResearchStudio-Idea"
 REEL_REPO="${REPO_ROOT}/ResearchStudio-Reel"
-# Vendored dependency skills (ppt-master, pptx2video) that Paper2Video delegates to.
-DEPS_DIR="${REPO_ROOT}/dependencies"
 
 CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$REPO_ROOT/.claude/skills}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$REPO_ROOT/.codex/skills}"
@@ -403,22 +401,23 @@ if [ "$USE_REEL" = 1 ]; then
   done
 
   # Paper2Video delegates deck authoring to ppt-master and rendering/QA to
-  # pptx2video. Both ship as vendored dependency skills under dependencies/;
-  # link them alongside the Reel skills so paper2video works out of the box.
-  log "Linking Paper2Video dependency skills (ppt-master, pptx2video)"
-  for dep_dir in "$DEPS_DIR"/*/; do
-    [ -d "$dep_dir" ] || continue
-    dep_name="$(basename "${dep_dir%/}")"
-    link_skill "${dep_dir%/}" "$dep_name"
-  done
-
-  # ppt-master's tools have optional Python deps (python-pptx, PyYAML, …);
-  # install them best-effort. pptx2video is a separate pip runtime the user
-  # installs from ai-nuts/pptx2video (see paper2video/README.md).
-  if [ -f "$DEPS_DIR/ppt-master/requirements.txt" ]; then
-    log "Python dependencies (ppt-master requirements)"
-    pip_install -r "$DEPS_DIR/ppt-master/requirements.txt" \
-      || warn "ppt-master requirements failed — some ppt-master tools may degrade; install manually if needed"
+  # pptx2video. Fetch both skills from their upstream repos via `npx skills add`.
+  if command -v npx >/dev/null 2>&1; then
+    log "Fetching Paper2Video dependency skills via npx skills add (ppt-master, pptx2video)"
+    for target_dir in \
+      "$([ "$USE_CLAUDE" = 1 ] && echo "$CLAUDE_SKILLS_DIR")" \
+      "$([ "$USE_CODEX" = 1 ] && echo "$CODEX_SKILLS_DIR")"; do
+      [ -n "$target_dir" ] || continue
+      mkdir -p "$target_dir"
+      ( cd "$target_dir" \
+        && npx -y skills add hugohe3/ppt-master --skill ppt-master \
+        && npx -y skills add ai-nuts/pptx2video --skill pptx2video ) \
+        || warn "npx skills add failed for ppt-master/pptx2video — install them manually; paper2video will not work until then"
+    done
+  else
+    warn "npx not found — install ppt-master + pptx2video manually:"
+    warn "    npx skills add hugohe3/ppt-master --skill ppt-master"
+    warn "    npx skills add ai-nuts/pptx2video --skill pptx2video"
   fi
   echo
 fi
@@ -450,7 +449,7 @@ if [ "$USE_REEL" = 1 ]; then
   echo
   echo "  Reel notes:"
   echo "    • Export ANTHROPIC_API_KEY (or your backend's key) in your shell."
-  echo "    • Paper2Video's 'ppt-master' + 'pptx2video' skills were linked from dependencies/."
+  echo "    • Paper2Video's 'ppt-master' + 'pptx2video' skills were fetched via npx skills add."
   echo "    • pptx2video also needs its pip runtime (see ResearchStudio-Reel/skills/paper2video/README.md):"
   echo "        pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'"
 fi

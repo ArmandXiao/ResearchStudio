@@ -324,7 +324,7 @@ async function main() {
     say(`  ${C.c}# Chromium for Paper2Poster HTML→PDF/PNG (~300 MB download)${C.r}`);
     say(`  ${PYTHON} -m playwright install chromium`);
     say(`  ${C.c}# pptx2video pip runtime for Paper2Video (skill was fetched via npx skills add)${C.r}`);
-    say(`  ${PYTHON} -m pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'`);
+    say(`  ${PYTHON} -m pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git'`);
   }
   say('');
   process.exit(0);

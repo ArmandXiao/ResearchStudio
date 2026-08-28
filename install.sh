@@ -464,7 +464,7 @@ if [ "$USE_REEL" = 1 ]; then
   echo "    • Export ANTHROPIC_API_KEY (or your backend's key) in your shell."
   echo "    • Paper2Video's 'ppt-master' + 'pptx2video' skills were fetched via npx skills add."
   echo "    • pptx2video also needs its pip runtime (see ResearchStudio-Reel/skills/paper2video/README.md):"
-  echo "        pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'"
+  echo "        pip install 'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git'"
 fi
 if [ "$USE_IDEA" = 1 ]; then
   echo

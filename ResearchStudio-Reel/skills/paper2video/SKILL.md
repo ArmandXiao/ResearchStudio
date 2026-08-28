@@ -27,7 +27,7 @@ self-implemented "Route A" that called private narration, duration, and
 visual-cue scripts and invoked `python -m pptx2video.render_video` /
 `pptx2video.build_timeline` / `pptx2video.check_video_package` as if they were
 importable submodules of the installed public package. Those modules do not
-exist at that import path in the public `pptx2video` 0.5.x CLI; the entry
+exist at that import path in the public `pptx2video` CLI; the entry
 points are the `pptx2video render`, `pptx2video doctor`, and `pptx2video
 bootstrap` subcommands. Do not recreate that shortcut. Do not hand-assemble a
 narration script, a visual-cue file, or a "simplified" render pipeline that
@@ -39,15 +39,21 @@ there is no lower-effort fallback for a rushed or low-context session.
 ## Why full delegation is mandatory
 
 `pptx2video render` is not a smoke-test wrapper. Its own CLI (`cli.py`
-`_render()`) reads `assets/meta/reports/video_qa_report.json` after every
-render and raises `SystemExit` unless `passed` is true with zero errors and
-zero warnings; the top-level CLI does not even expose a `--no-qa` flag, so an
-agent invoking `pptx2video render` directly cannot silently skip strict QA. A
-hand-rolled call into an internal module could skip that gate. This is the
-concrete mechanism this skill relies on to stop an agent from cutting corners
-under time pressure: route every render through the command in Step 5, and
-treat a non-zero exit as a blocking failure to fix, never as a reason to fall
-back to a simpler local script.
+`_render()`) always runs the QA pass and always writes
+`assets/meta/reports/video_qa_report.json`; there is no `--no-qa` flag and no
+way to skip the check itself. A hand-rolled call into an internal module could
+skip that gate entirely, which is why every render goes through the Step 5
+command.
+
+**The strict gate is opt-in, and Step 5 opts in.** Upstream `pptx2video`
+defaults `--qa-mode` to `warn-only`, which delivers a bundle despite blocking
+warnings — the right default for previews and demos, the wrong one for a
+Paper2Video deliverable. Step 5 therefore passes `--qa-mode strict`
+explicitly. Never drop that flag to make a failing render succeed: a blocking
+warning means the deck is not deliverable, and the repair belongs in
+ppt-master (Step 3) or the narration, not in the gate. Treat a non-zero exit
+as a blocking failure to fix, never as a reason to relax the mode or fall back
+to a simpler local script.
 
 ## Two child skills, one shared trigger decision
 
@@ -112,12 +118,13 @@ npx skills add hugohe3/ppt-master --skill ppt-master
 npx skills add ai-nuts/pptx2video --skill pptx2video
 ```
 
-Install and verify the compatible public `pptx2video` 0.5.x CLI runtime. Use a
-Python 3.11 or newer environment:
+Install and verify the public `pptx2video` CLI runtime. Use a Python 3.11 or
+newer environment, and track the upstream default branch — this is the install
+form `pptx2video`'s own SKILL.md documents:
 
 ```bash
 python -m pip install \
-  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
+  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git'
 python -m playwright install chromium
 python3 -m pptx2video --version
 python3 -m pptx2video doctor --svg
@@ -125,12 +132,17 @@ python3 -m pptx2video doctor --svg
 
 **Always invoke the runtime as `python3 -m pptx2video ...`, never as the bare
 `pptx2video` command.** A host may have an older `pptx2video` (for example
-`0.3.0`) earlier on `PATH` than the intended `0.5.x` install; the bare command
-then silently resolves to the wrong version with no error. `python3 -m
-pptx2video --version` must print `pptx2video 0.5.x`; a different major/minor
-version means fix the environment (`pip install` target, `PATH`, virtualenv)
-before continuing, not proceed and hope the CLI surface still matches this
+`0.3.0`) earlier on `PATH` than the intended install; the bare command then
+silently resolves to the wrong version with no error. Compare `python3 -m
+pptx2video --version` against `pip show pptx2video`; when they disagree, fix
+the environment (`pip install` target, `PATH`, virtualenv) before continuing,
+rather than proceeding and hoping the CLI surface still matches this
 document.
+
+**Track the upstream default branch; do not pin a release tag.** `pptx2video`
+ships features between tags, so a tag pin silently withholds them from every
+paper2video user. Reinstall from the default branch to pick up upstream
+fixes.
 
 Do not hard-code a host-specific skill directory. Users may run this
 repository from Codex, Claude Code, a shell, or another agent. This skill
@@ -379,7 +391,8 @@ python3 -m pptx2video render \
   --resolution 1080p \
   --ids-from-script "$VIDEO_AUDIO/script.json" \
   --animation-order-policy animation-pane \
-  --click-group-policy <pptx2video_click_group_policy from Step 2>
+  --click-group-policy <pptx2video_click_group_policy from Step 2> \
+  --qa-mode strict
 ```
 
 - `--click-group-policy` must be the exact value Step 2 resolved
@@ -401,12 +414,16 @@ python3 -m pptx2video render \
   render; those are for an explicit re-render of a previously delivered deck.
 
 **Do not add `--no-qa`.** It does not exist on the top-level `pptx2video
-render` CLI; QA is unconditionally enforced by `cli.py`'s own `_render()`,
-which reads `assets/meta/reports/video_qa_report.json` after rendering and
-raises `SystemExit` unless `passed` is true with zero errors and zero
-warnings. A non-zero exit here is a blocking failure: fix the deck, script, or
-flags and rerun this exact command; do not fall back to a private render path
-to force a result through.
+render` CLI. QA always runs and always writes
+`assets/meta/reports/video_qa_report.json`; `--qa-mode` only decides which
+findings fail the render. Under the `strict` mode this step passes,
+`cli.py`'s own `_render()` raises `SystemExit` unless the checker reported
+`passed`, which blocks on every error and every non-exempt warning. Codes the
+checker exempts (currently `audio_extra_files`, an unreferenced MP3 left over
+from a previous run) stay visible in the report without blocking. A non-zero
+exit here is a blocking failure: fix the deck, script, or flags and rerun this
+exact command; do not relax `--qa-mode` and do not fall back to a private
+render path to force a result through.
 
 On success, promote the fresh bundle into `<video_outdir>` without clobbering
 an existing `manifest.json` from a different paper2* skill sharing the same
@@ -481,8 +498,9 @@ Step 5's QA gate and Step 6's trigger audit.
   native numbering.
 - `ppt_stage_validator.py audit-final-pptx-trigger` exits 0 against the exact
   `ppt_trigger` resolved in Step 2.
-- `pptx2video render`'s own QA gate (`video_qa_report.json`) passed with zero
-  errors and zero warnings.
+- `pptx2video render`'s own QA gate (`video_qa_report.json`) reported
+  `passed` under `--qa-mode strict`: no errors, and no warnings outside the
+  checker's own exempt list.
 
 ## Key rules
 

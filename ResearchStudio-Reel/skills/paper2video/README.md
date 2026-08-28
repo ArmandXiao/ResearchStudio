@@ -57,13 +57,13 @@ Install the two external skills in order, then install and verify the public `pp
 npx skills add hugohe3/ppt-master --skill ppt-master
 npx skills add ai-nuts/pptx2video --skill pptx2video
 python -m pip install \
-  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
+  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git'
 python -m playwright install chromium
 python3 -m pptx2video --version
 python3 -m pptx2video doctor --svg
 ```
 
-Always invoke the runtime as `python3 -m pptx2video ...`, never the bare `pptx2video` command; a stale `pptx2video` earlier on `PATH` silently resolves to the wrong version otherwise. `python3 -m pptx2video --version` must print `pptx2video 0.5.x`.
+Install from the upstream default branch rather than a release tag: `pptx2video` ships features between tags, and a tag pin silently withholds them. Always invoke the runtime as `python3 -m pptx2video ...`, never the bare `pptx2video` command; a stale `pptx2video` earlier on `PATH` silently resolves to the wrong version otherwise. Compare `python3 -m pptx2video --version` against `pip show pptx2video` when they might disagree.
 
 From a Claude Code session:
 
@@ -94,7 +94,7 @@ The package is not complete until `video.mp4`, `video_no_subtitles.mp4`, `video.
 
 - Python >= 3.11
 - Installed `ppt-master` and `pptx2video` skills
-- Compatible `pptx2video` 0.5.x CLI runtime from `ai-nuts/pptx2video`, installed with the `svg` extra
+- `pptx2video` CLI runtime from `ai-nuts/pptx2video` default branch, installed with the `svg` extra
 - Playwright Chromium installed with `python -m playwright install chromium`
 - A passing `python3 -m pptx2video doctor --svg` check
 - LibreOffice, Poppler, FFmpeg / FFprobe

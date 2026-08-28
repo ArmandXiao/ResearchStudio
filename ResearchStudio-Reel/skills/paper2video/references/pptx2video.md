@@ -2,7 +2,7 @@
 
 Paper2Video delegates every render to the independently maintained
 [`ai-nuts/pptx2video`](https://github.com/ai-nuts/pptx2video) skill and its
-public 0.5.x CLI. This skill does not copy or vendor that package's runtime,
+public CLI. This skill does not copy or vendor that package's runtime,
 and it never imports a private `pptx2video.<module>` path. This file lists the
 exact flags Step 5 of `SKILL.md` relies on and the pitfalls that make an
 almost-right invocation silently diverge from the protocol.
@@ -13,7 +13,7 @@ almost-right invocation silently diverge from the protocol.
 npx skills add hugohe3/ppt-master --skill ppt-master
 npx skills add ai-nuts/pptx2video --skill pptx2video
 python -m pip install \
-  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git@v0.5.0'
+  'pptx2video[svg] @ git+https://github.com/ai-nuts/pptx2video.git'
 python -m playwright install chromium
 python3 -m pptx2video --version
 python3 -m pptx2video doctor --svg
@@ -22,10 +22,11 @@ python3 -m pptx2video doctor --svg
 ## The PATH trap: always use `python3 -m pptx2video`
 
 A host can have an older `pptx2video` earlier on `PATH` than the intended
-0.5.x install. The bare `pptx2video` command then silently resolves to that
+install. The bare `pptx2video` command then silently resolves to that
 older version with no error; it does not fail, it just renders with a
-different, incompatible flag surface. `python3 -m pptx2video --version` must
-print `pptx2video 0.5.x`. Every command in this file and in `SKILL.md` uses
+different, incompatible flag surface. Compare `python3 -m pptx2video
+--version` against `pip show pptx2video` when they might disagree. Every
+command in this file and in `SKILL.md` uses
 `python3 -m pptx2video`, never the bare `pptx2video` binary, for exactly this
 reason.
 
@@ -88,14 +89,17 @@ the CLI refuses to write into an existing path.
 - **`--resolution {720p,1080p,1440p,4k}`, default `1080p`.** Pass `1080p`
   explicitly for a predictable, documented default; do not silently rely on
   whatever the installed CLI version happens to default to.
-- **Do not pass `--no-qa`.** It does not exist on the top-level `render`
-  subcommand. QA is unconditionally enforced by `cli.py`'s `_render()`, which
-  reads `assets/meta/reports/video_qa_report.json` after every render and
-  raises `SystemExit` unless `passed` is `true` with zero `error` and zero
-  `warning` counts. There is no flag on this CLI surface that disables that
-  check; a hand-rolled call into an internal module is the only way to skip
-  it, which is exactly why this skill forbids calling any internal module
-  directly (see `SKILL.md`'s "Why full delegation is mandatory").
+- **`--qa-mode {strict,warn-only}`, upstream default `warn-only`. Always pass
+  `strict` explicitly for Paper2Video delivery.** QA always runs and always
+  writes `assets/meta/reports/video_qa_report.json`; this flag only decides
+  which findings fail the render. `warn-only` fails on `error` findings but
+  delivers the bundle despite blocking warnings — correct for previews and
+  demos, wrong for a Paper2Video deliverable. `strict` additionally fails on
+  any non-exempt warning, which is the gate this skill's Step 5 depends on.
+  There is still no `--no-qa` flag and no way to skip the QA pass itself; a
+  hand-rolled call into an internal module remains the only way to bypass it,
+  which is exactly why this skill forbids calling any internal module directly
+  (see `SKILL.md`'s "Why full delegation is mandatory").
 - **Do not pass `--baseline-pptx` / `--narration-mode regenerate` for a first
   render.** Those flags exist for an explicit later re-render of a previously
   delivered deck against a new edited PPTX; they are irrelevant to Step 5's
@@ -105,7 +109,7 @@ the CLI refuses to write into an existing path.
   band while leaving `video_no_subtitles.mp4` and the `.srt`/`.vtt` sidecars
   untouched, which is what `paper2reel` expects downstream.
 
-## Full flag surface (from `pptx2video render --help`, 0.5.x)
+## Full flag surface (from `pptx2video render --help`)
 
 ```
 pptx2video render <pptx> <output>
@@ -129,9 +133,11 @@ pptx2video render <pptx> <output>
   --click-group-policy {normalize,preserve}  default normalize
   --no-subtitles
   --keep-temp
+  --qa-mode {strict,warn-only}            default warn-only
 ```
 
-There is no `--no-qa` flag on this list; see above.
+There is no `--no-qa` flag on this list; see above. `--qa-mode` changes which
+findings block, never whether QA runs.
 
 ## Verify dependencies before rendering
 

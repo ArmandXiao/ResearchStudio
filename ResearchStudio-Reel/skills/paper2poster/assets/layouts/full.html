@@ -799,9 +799,10 @@
     line-height: 1.3;
   }
   /* P5: big-number aside — one giant figure + label */
-  .p-key-stat { display: flex; gap: 0.4em; align-items: baseline; padding: 0.25em 0; }
-  .p-key-stat .num { font-size: 3em; color: var(--accent); font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
-  .p-key-stat .label { font-size: 0.9em; color: var(--muted); }
+  .p-key-stat { padding: 0.25em 0; font-size: 0.9em; line-height: 1.45; color: var(--muted); }
+  .p-key-stat::after { content: ""; display: block; clear: both; }
+  .p-key-stat .num { float: left; margin: 0 0.28em 0 0; font-size: 2.22em; line-height: 1.17; color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; }
+  .p-key-stat .label { display: inline; }
   /* P6: stat-strip — 3–5 mini metrics inline */
   .p-stat-strip { display: flex; gap: 0.5em; align-items: stretch; }
   .p-stat-strip .cell {

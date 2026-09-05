@@ -7,7 +7,7 @@ The poster source is decoupled into orientation-aware pieces under <skill>/asset
                             with a {{HEADER}} hook in <body> and a {{STYLE_CSS}}
                             hook in <head>.
     styles/<style>.css      VISUAL     — one of the installed card treatments.
-    headers*/<header>.html  TITLEBAR   — landscape v1..v5 or Portrait pv1..pv5.
+    headers*/<header>.html  TITLEBAR   — landscape v1..v7 or Portrait pv1..pv7.
 
 compose(layout, style, header, outpath) reads the layout, injects the style CSS at
 {{STYLE_CSS}} and the header HTML at {{HEADER}}, and writes ONE self-contained
@@ -67,6 +67,7 @@ MATH_ENGINES = ("katex", "mathjax")
 # narrow columns. Keep their source CSS installed for Landscape, but remove them
 # from Portrait's catalog so neither random nor explicit selection can use them.
 PORTRAIT_EXCLUDED_STYLES = frozenset({"underline", "double-rule"})
+BRANDING_FREE_HEADERS = frozenset({"v6", "v7", "pv6", "pv7"})
 
 # Batch sampler v4 resolves every requested random axis JOINTLY.  The previous
 # sampler balanced each axis in isolation, which made every marginal look good
@@ -327,8 +328,11 @@ def compose(layout: str, style: str, header: str, outpath, *,
     rewrite the :root accent vars in place. Returns the output Path.
 
     ``orientation`` = ``landscape`` (default) reads assets/layouts/ and composes
-    all axes. ``portrait`` reads assets/layouts_portrait/, uses pv1-pv5 headers,
+    all axes. ``portrait`` reads assets/layouts_portrait/, uses pv1-pv7 headers,
     and omits only the Scan-to-Read body section. Exits non-zero on any error.
+
+    v6/v7 and pv6/pv7 omit institution names and logos. They are explicit-only;
+    random selection retains the existing branded header catalog.
 
     Random selection is deterministic. The seed precedence is explicit ``seed``,
     ``POSTER_SEED``, then the resolved absolute output path. For a 30+ paper batch,
@@ -375,7 +379,8 @@ def compose(layout: str, style: str, header: str, outpath, *,
         "layouts": [o for o in _options(layouts, ".html")
                     if o not in ("methoddriven", "methoddriven4")],
         "styles": orientation_styles,
-        "headers": _options(headers, ".html"),
+        "headers": [name for name in _options(headers, ".html")
+                    if name not in BRANDING_FREE_HEADERS],
         "themes": sorted(apply_theme.THEMES),
     }
 
@@ -625,7 +630,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="visual style name or random (default POSTER_STYLE or random)")
     ap.add_argument("--header", default=os.environ.get("POSTER_HEADER", "random"),
                     help="titlebar variant (default POSTER_HEADER or random): landscape v1-v5, "
-                         "portrait pv1-pv5")
+                         "portrait pv1-pv5; opt-in no institutions/logos: "
+                         "v6/v7 (landscape), pv6/pv7 (portrait)")
     ap.add_argument("--scan", default="aside",
                     help="Scan-to-Read variant: single | dual (group keyword — "
                          "recommended; compose picks within the group) | random | "
@@ -642,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
                     choices=("landscape", "portrait"),
                     help="landscape (default POSTER_ORIENTATION; 4 axes) | "
                          "portrait (layouts_portrait/, "
-                         "pv1-pv5 titlebar, no scan section)")
+                         "pv1-pv7 titlebar, no scan section)")
     ap.add_argument("--seed", default=None,
                     help="stable seed for random axes (default: POSTER_SEED or the "
                          "resolved absolute --out path)")

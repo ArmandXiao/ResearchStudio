@@ -73,9 +73,26 @@ Both orientations are **composed at build time** instead of selecting a monolith
 
 **Venue logo** — `paper2assets` best-effort fetches the conference mark (Wikipedia / Wikidata) into `assets/logos/_venue.png`; the header shows that logo and hides the venue-year text so the two never duplicate. The venue is always the **real conference / journal** — never "arXiv" (a preprint host is not a publication venue).
 
-**Institution logos** — `references/fit_logos.py` packs the institution marks to fill the header zone at a single **uniform height** (every logo enlarges together, sized by the browser's true aspect ratio so even wide SVG wordmarks fit without overflowing the band). Its automatic completion is an allowlist operation: only accepted `logos[]` entries in `assets/logos/logos.json` may be injected, so orphan cover images and rejected or stale marks are not rendered merely because they remain in the directory. Historical `logos[]` entries without approval fields remain compatible. If the manifest is missing, the fitter adds nothing from disk and only preserves explicit HTML sources. `assets/logos/_venue.png` remains a separate conference resource. Landscape headers expose six logo slots; Portrait headers expose four.
+**Institution logos** — `references/fit_logos.py` packs the institution marks to fill the header zone at a single **uniform height** (every logo enlarges together, sized by the browser's true aspect ratio so even wide SVG wordmarks fit without overflowing the band). Its automatic completion is an allowlist operation: only accepted `logos[]` entries in `assets/logos/logos.json` may be injected, so orphan cover images and rejected or stale marks are not rendered merely because they remain in the directory. Historical `logos[]` entries without approval fields remain compatible. If the manifest is missing, the fitter adds nothing from disk and only preserves explicit HTML sources. `assets/logos/_venue.png` remains a separate conference resource. Branded Landscape headers expose six logo slots; branded Portrait headers expose four. The explicit `v6`/`v7` and `pv6`/`pv7` headers expose none.
 
-**QR codes** — in Landscape, the Paper / Code QRs live in the **Scan to Read** section for headers v1–v4; the v5 classic header carries a QR in the title band itself. The **3col layout suppresses Scan-to-Read** and is kept off v5, so a 3col poster carries no QR. Portrait has no standalone Scan-to-Read section and uses only its selected `pv1`–`pv5` header's QR slots.
+**QR codes** — in Landscape, the Paper / Code QRs live in the **Scan to Read** section for headers v1–v4 and v6–v7; the v5 classic header carries a QR in the title band itself. The **3col layout suppresses Scan-to-Read** and is kept off v5, so a 3col poster carries no QR. Portrait has no standalone Scan-to-Read section and uses only its selected `pv1`–`pv7` header's QR slots.
+
+## No institution names or logos
+
+Choose an explicit **Title banner** template rather than relying on a prompt:
+
+| Layout direction | Centered | Left-aligned |
+|---|---|---|
+| Landscape | `--header v6` | `--header v7` |
+| Portrait | `--header pv6` | `--header pv7` |
+
+The Web selector labels these **Clean centered / Clean left · no institutions/logos**.
+They work with every body layout in the chosen orientation. They keep the title,
+plain author names, venue text and normal QR placement, but have no institution
+legend or logo containers. Existing branded templates and random pools are unchanged.
+Fill `{{AUTHORS_PLAIN}}` and follow `references/branding_free_headers.md`; the
+logo fitter respects the explicit opt-out and preflight rejects restored branding.
+This does not anonymize authors or remove text embedded in scientific figures.
 
 ## Deterministic diversity for batches
 
@@ -99,7 +116,7 @@ Every composed HTML embeds the resolved manifest in `#paper2poster-composition` 
 |---|---|---|
 | `POSTER_ORIENTATION` | `landscape` | `landscape` or `portrait` |
 | `POSTER_STYLE` | `random` | Landscape: 1 of 11; Portrait: 1 of 9, excluding `underline` and `double-rule` |
-| `POSTER_HEADER` | `random` | Landscape `v1`–`v5`; Portrait `pv1`–`pv5` |
+| `POSTER_HEADER` | `random` | Branded pool: Landscape `v1`–`v5`, Portrait `pv1`–`pv5`; explicit no institutions/logos: `v6`/`v7`, `pv6`/`pv7` |
 | `POSTER_THEME` | `random` | shared theme: 1 of 9 (`blue` … `mono`) |
 | `POSTER_SEED` | resolved absolute output path | stable seed for ordinary random-axis selection; explicit `--seed` wins |
 | `POSTER_VARIANT_SEED` | ordinary seed | shared batch seed used with `--variant-index` for balanced cycles |

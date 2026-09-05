@@ -4,6 +4,13 @@ How to fill a composed `poster.html` with values pulled from `paper_spec.md`. Re
 
 ## Template selection
 
+For an explicit no-institution/no-logo poster, select `v6` / `v7` (Landscape)
+or `pv6` / `pv7` (Portrait). See `branding_free_headers.md`. These templates
+use `{{AUTHORS_PLAIN}}` (names only, no superscripts or affiliation/role markers)
+and expose **no** author-legend, contact or logo slots. The affiliation/logo
+instructions below apply only to branded headers. Never re-add those absent
+slots; extra SUBS keys are ignored. Venue text and QR codes remain supported.
+
 Choose the orientation explicitly, then drive the layout by the Method figure's column width and aspect ratio.
 
 | Orientation / figure | Composed layout |
@@ -14,7 +21,7 @@ Choose the orientation explicitly, then drive the layout by the Method figure's 
 | Portrait `{column=full}` or AR ≥ 1.2 | `assets/layouts_portrait/full.html`, four content bands: Problem\|Motivation, Method hero, Key Results\|Ablation\|Headline Numbers at `1.5fr 1fr 1fr`, then full-width Takeaway |
 | `**Figure:** none` | Compose `--layout half` for the chosen orientation, then remove the Method `<figure>` block |
 
-All layouts share placeholder tokens, audio markup, keybinding scripts, and design tokens. Always create the working file with `references/compose_poster.py`; it injects layout, style, theme, and a real header (`v1`–`v5` landscape or `pv1`–`pv5` portrait). Portrait has no standalone Scan-to-Read section or scan axis, but it still has a composed header. Then apply substitutions with the Edit tool one `{{...}}` token at a time. **Never write the full file inline** because the ~100 KB template overflows the per-turn output-token cap. For many substitutions at once, copy the **`build_poster.py` skeleton in this folder** to `<outdir>/assets/meta/build_poster.py`, fill its `SUBS` dict, and run `python <outdir>/assets/meta/build_poster.py <outdir>/poster.html`. Do not edit the generated CSS, JS, or structural markup.
+All layouts share placeholder tokens, audio markup, keybinding scripts, and design tokens. Always create the working file with `references/compose_poster.py`; it injects layout, style, theme, and a real header (`v1`–`v7` landscape or `pv1`–`pv7` portrait). Portrait has no standalone Scan-to-Read section or scan axis, but it still has a composed header. Then apply substitutions with the Edit tool one `{{...}}` token at a time. **Never write the full file inline** because the ~100 KB template overflows the per-turn output-token cap. For many substitutions at once, copy the **`build_poster.py` skeleton in this folder** to `<outdir>/assets/meta/build_poster.py`, fill its `SUBS` dict, and run `python <outdir>/assets/meta/build_poster.py <outdir>/poster.html`. Do not edit the generated CSS, JS, or structural markup.
 
 Before substituting any figure placeholder, run `scripts/select_figures.py
 <outdir>` and read `<outdir>/assets/meta/figure_selection.json`. New semantic

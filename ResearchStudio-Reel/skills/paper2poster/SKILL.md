@@ -131,6 +131,8 @@ Paper2Assets package, and be rendered again. Cached PDF/PNG existence alone is
 never proof that the Motivation image is correct.
 
 Re-render ONLY when:
+- the user changes the header template, including switching to/from an explicit
+  no-institution header → recompose and re-export instead of reusing the cache
 - one of `poster.{html,pdf,png}` is missing → resume from the
   appropriate step (`poster.html` missing → start from Step 2 fill loop;
   only `poster.pdf` / `poster.png` missing → just run Step 6 render)
@@ -139,6 +141,15 @@ Re-render ONLY when:
   delete `<outdir>/poster.html` first so the cache check doesn't fire.
 
 ### Step 1 — Verify paper2assets prerequisites
+
+**No institution names/logos requested?** Select the explicit unbranded header
+first: Landscape `v6` (centered) / `v7` (left), Portrait `pv6` (centered) / `pv7`
+(left). Read `references/branding_free_headers.md`. For these templates, skip the
+logo recovery below, preserve any shared logo assets, and still recover QR assets
+if needed. Their structure deliberately has no affiliation/logo slots; do not
+add them during substitution or fitting. This exception also applies to all
+later logo-fetching and affiliation instructions. The regular cache shortcut
+does not apply when the requested header differs from the cached poster.
 
 Required argument: an `<outdir>/` path produced by the `paper2assets` skill, or a path to a source `*.pdf`. Verify the required files exist before doing any work:
 
@@ -254,7 +265,7 @@ Both orientations share four independent axes under `assets/`: **layout × style
 
 - **Structure:** landscape `assets/layouts/{full,half,3col}.html`; portrait `assets/layouts_portrait/{full,half}.html`.
 - **Visual style:** `assets/styles/*.css`; Landscape enables all 11 treatments, while Portrait excludes `underline` and `double-rule` and enables the remaining 9.
-- **Titlebar:** landscape `assets/headers/{v1,v2,v3,v4,v5}.html`; portrait `assets/headers_portrait/{pv1,pv2,pv3,pv4,pv5}.html`.
+- **Titlebar:** landscape `assets/headers/{v1,v2,v3,v4,v5,v6,v7}.html`; portrait `assets/headers_portrait/{pv1,pv2,pv3,pv4,pv5,pv6,pv7}.html`. The `*6` / `*7` variants are opt-in, without institution names/logos.
 - **Color/theme:** 9 bundles from `references/apply_theme.py`, shared by both orientations.
 - **Scan-to-Read:** landscape only, from `assets/scan/*.html`.
 
@@ -314,6 +325,13 @@ The first three are **full themes** (they retheme the header + page background);
 
 **Axis 3 — header (`POSTER_HEADER`, default randomize):**
 
+**Explicit no-institution templates:** `v6` / `v7` (Landscape), `pv6` / `pv7`
+(Portrait) omit both institution names and all header logos by construction.
+Choose centered (`*6`) or left-aligned (`*7`); both retain author names, venue
+text and the orientation's normal QR behavior. Fill `{{AUTHORS_PLAIN}}` rather
+than the affiliation-marked `{{AUTHORS}}`. They are excluded from random pools.
+See `references/branding_free_headers.md` for the complete contract.
+
 1. **`v1`** — venue (left) · title (center) · institution logos (right). Symmetric 3-zone band.
 2. **`v2`** — mirror of v1: institution logos (left) · title (center) · venue (right).
 3. **`v3`** — title centered full-width with a single equal-height logo strip below (conference mark + institutions).
@@ -330,7 +348,7 @@ v1–v4 each render the conference **logo** when `assets/logos/_venue.png` exist
 |------|---------|--------------|----------|
 | layout | landscape `full` · `half` · `3col` / portrait `full` · `half` | `assets/layouts/<layout>.html` · `assets/layouts_portrait/<layout>.html` | Method-figure AR / figure count (Axis 1) → `--layout` |
 | style | Landscape: all 11. Portrait: `solid` · `framed` · `simple` · `left-bar` · `elevated` · `neo-brutal` · `tag` · `tinted` · `legend-frame` (9) | `assets/styles/<style>.css` | `POSTER_STYLE` (default random within the orientation catalog) → `--style` |
-| header | landscape `v1`·`v2`·`v3`·`v4`·`v5`(opt-in) / portrait `pv1`·`pv2`·`pv3`·`pv4`·`pv5` | `assets/headers/<v>.html` · `assets/headers_portrait/<pv>.html` | `POSTER_HEADER` (default random) → `--header` |
+| header | landscape `v1`–`v5` / portrait `pv1`–`pv5`; opt-in no institutions/logos: `v6`·`v7` / `pv6`·`pv7` | `assets/headers/<v>.html` · `assets/headers_portrait/<pv>.html` | `POSTER_HEADER` (default random, branded pool only) → `--header` |
 | scan | landscape only: `single` · `dual` (group keywords — recommended) · `aside`(default) · `hero` · `contact` · `directory` · `banner` · `twin` · `chips` | `assets/scan/<variant>.html` | code QR resolves → `--scan dual`, else `--scan single` (Axis 4) → `--scan`; portrait has no scan axis |
 | color/theme | `blue` · `teal` · `green` · `burgundy` · `purple` · `rust` · `slate` · `plum` · `mono` (9 accents) | `references/apply_theme.py` (`THEMES`) | `POSTER_THEME` (default `random`, deterministic per seed) → `--theme`. Applies to landscape and portrait via composition. |
 
@@ -370,11 +388,11 @@ Equivalent Opus-style alternative when you have many substitutions: **copy the r
 
 **Read `references/template_substitution.md` now** — it carries the full placeholder map, the code-driven theme color (1-of-9, applied by compose / `apply_theme.py` — do NOT hand-edit `:root`), per-section accent palette, vertical-sizing convention (in Portrait Half, exactly one `grow` on the bottom-most section of each column), and the **lean initial render policy**: only `Necessary` of the six core sections; all three optional sections (Contribution, Dataset / Benchmark, Ablation Study) and every `Additional` paragraph are deliberately withheld at this stage.
 
-**Decoupled-header + QR placeholder contract (NEW — edge cases).** The following `v1`–`v5` scan-placement rules are for landscape. Portrait always composes one of `pv1`–`pv5`, exposes `{{LOGO_1}}`…`{{LOGO_4}}` plus its header QR placeholders, and has no standalone Scan-to-Read section or scan axis. Fill portrait QR slots only when the referenced QR file exists. The composed headers replace the old titlebar, so the placeholder set changed:
+**Decoupled-header + QR placeholder contract.** Landscape `v6`/`v7` follow the same body-scan rules as `v1`–`v4`. Portrait `pv1`–`pv5` expose `{{LOGO_1}}`…`{{LOGO_4}}` plus header QR placeholders; `pv6`/`pv7` expose only the QR placeholders, with no logo or affiliation slots. All Portrait headers omit the standalone Scan-to-Read section and scan axis. Fill portrait QR slots only when the referenced QR file exists. The composed headers replace the old titlebar, so the placeholder set changed:
 - **Venue:** landscape `v1`–`v4` use `{{VENUE_NAME}}` + `{{VENUE_YEAR}}` and an optional `{{VENUE_LOGO}}`. Set `VENUE_LOGO` to `assets/logos/_venue.png` **only if that file exists**, else `""`; when empty, the header paints the venue/year text in the conference chip. The legacy `{{VENUE}}` token is retired. Landscape `v5` and Portrait `pv1`–`pv5` intentionally keep `{{VENUE_LINK}}` and `{{VENUE_TAG}}` for their compact text badge.
-- **Institution logos:** landscape exposes `{{LOGO_1}}`…`{{LOGO_6}}`; portrait exposes `{{LOGO_1}}`…`{{LOGO_4}}`. Fill each present institution's path; set every **unused** slot to `""` (empty/unfilled chips auto-hide).
+- **Institution logos (branded headers only):** landscape exposes `{{LOGO_1}}`…`{{LOGO_6}}`; portrait exposes `{{LOGO_1}}`…`{{LOGO_4}}`. Fill each present institution's path; set every **unused** slot to `""` (empty/unfilled chips auto-hide).
 - **QR placement depends ONLY on the header — the QR appears in exactly ONE place, and NEVER in the Title Section except for `v5`:**
-  - **Headers `v1` / `v2` / `v3` / `v4` →** the Title Section carries NO QR (these headers have no QR slot at all). ALWAYS fill the standalone **Scan to Read** `.section` (`data-section="scan-to-read"`, right after Takeaway) via `{{QR_PAPER}}` / `{{QR_CODE}}`, and set the header's `{{HDR_QR_PAPER}}` / `{{HDR_QR_CODE}}` to `""`. Institution count is **irrelevant** — the old "≤ 2 institutions → header QR" rule is **RETIRED**; the QR never joins the logo row. The section's **internal layout is the `--scan` axis** (Step 3): pass `--scan dual` when a code QR resolves, else `--scan single`, so a two-QR layout never lands on a one-QR paper. Beyond `{{QR_PAPER}}`/`{{QR_CODE}}`, the picked variant may also expose the display-URL placeholders `{{URL_PAPER}}` / `{{URL_CODE}}` / `{{URL_PROJECT}}` (short URL text from `metadata.json`, e.g. `arxiv.org/abs/2106.09711`) and `{{CONTACT}}` — fill whatever exists and leave the rest `""`; every one auto-hides when empty. **Exception — `--layout 3col`:** the standalone Scan-to-Read section is **suppressed** in the 3col layout (its 1/3-width column is too wide for the section's small content and reads as empty), so a 3col poster intentionally carries **NO QR**. When you compose with `--layout 3col`, leave `{{QR_PAPER}}` / `{{QR_CODE}}` (and the other scan content placeholders) empty — they would render into a hidden section anyway.
+  - **Headers `v1` / `v2` / `v3` / `v4` / `v6` / `v7` →** the Title Section carries NO QR (these headers have no QR slot at all). ALWAYS fill the standalone **Scan to Read** `.section` (`data-section="scan-to-read"`, right after Takeaway) via `{{QR_PAPER}}` / `{{QR_CODE}}`, and set the header's `{{HDR_QR_PAPER}}` / `{{HDR_QR_CODE}}` to `""`. Institution count is **irrelevant** — the old "≤ 2 institutions → header QR" rule is **RETIRED**; the QR never joins the logo row. The section's **internal layout is the `--scan` axis** (Step 3): pass `--scan dual` when a code QR resolves, else `--scan single`, so a two-QR layout never lands on a one-QR paper. Beyond `{{QR_PAPER}}`/`{{QR_CODE}}`, the picked variant may also expose the display-URL placeholders `{{URL_PAPER}}` / `{{URL_CODE}}` / `{{URL_PROJECT}}` (short URL text from `metadata.json`, e.g. `arxiv.org/abs/2106.09711`) and `{{CONTACT}}` — fill whatever exists and leave the rest `""`; every one auto-hides when empty. **Exception — `--layout 3col`:** the standalone Scan-to-Read section is **suppressed** in the 3col layout (its 1/3-width column is too wide for the section's small content and reads as empty), so a 3col poster intentionally carries **NO QR**. When you compose with `--layout 3col`, leave `{{QR_PAPER}}` / `{{QR_CODE}}` (and the other scan content placeholders) empty — they would render into a hidden section anyway.
   - **Header `v5`** (classic) is the ONLY header with a titlebar QR — with `v5`, ALWAYS fill `{{HDR_QR_PAPER}}` / `{{HDR_QR_CODE}}` and leave the section `{{QR_*}}` empty, so the QR shows once (in the v5 header) and the `scan-to-read` section auto-hides.
   - **Render-time guarantee (CSS — belt-and-suspenders, you do NOT rely on the build filling the right one):** every layout hides `.section[data-section="scan-to-read"]` whenever the titlebar carries a FILLED QR (`body:has(.titlebar img.qr-img[filled]) , body:has(.titlebar .qr-tile .chip.qr img[filled]) -> [data-section="scan-to-read"]{display:none}`). So even if BOTH the header QR and the section QR get filled, the standalone Scan-to-Read section is suppressed at render time and the QR can never appear twice.
   - Every QR placeholder auto-hides when empty or when its `assets/qr/*.png` is absent — set a path only if the file exists.

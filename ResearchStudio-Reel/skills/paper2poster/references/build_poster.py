@@ -63,6 +63,7 @@ SUBS = {
     # titlebar / metadata
     "{{TITLE}}":         "...",
     "{{AUTHORS}}":       "...",
+    "{{AUTHORS_PLAIN}}": "...",
     "{{AUTHOR_LEGEND}}": "...",   # e.g. '<sup>1</sup> MIT &nbsp;&nbsp; <sup>2</sup> NUS'
     "{{VENUE}}":         "...",
     "{{VENUE_NAME}}":    "...",

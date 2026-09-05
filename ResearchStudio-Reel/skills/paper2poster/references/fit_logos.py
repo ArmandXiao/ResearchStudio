@@ -640,11 +640,17 @@ def bake(poster_path, max_rows=3, pad_frac=0.06):
                                           # zone sizes differently under screen vs print media,
                                           # so measure the SAME layout the final PDF/PNG uses.
         pg.goto(poster.as_uri()); pg.wait_for_timeout(600)
+        branding_hidden = pg.locator(
+            '.titlebar[data-institution-branding="none"]'
+        ).count() > 0
+        if branding_hidden:
+            approved_logos = []
+            approved_srcs = []
         # Venue inject: if the venue logo file exists on disk but the header isn't showing
         # it (the <img> was left empty, or its onerror="this.remove()" already fired on the
         # empty src), (re)create the venue <img> in the conference chip and point it at the
         # file. Only acts when the chip has no real logo yet — never overrides a good one.
-        if (base / "assets" / "logos" / "_venue.png").exists():
+        if not branding_hidden and (base / "assets" / "logos" / "_venue.png").exists():
             # Insert the venue <img> INTO the conference chip (.chip.conf), never its
             # .venue-mark parent. The vtext-hide CSS keys off `.chip.conf:has(img[src])`,
             # so an <img> placed in the parent leaves the chip "logo-less" and the year

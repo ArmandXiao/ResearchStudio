@@ -114,6 +114,65 @@ class _FigureUsageParser(HTMLParser):
                 return
 
 
+class _BrandingFreeHeaderParser(HTMLParser):
+    """Reject branding accidentally restored to an explicitly unbranded header."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, bool, bool]] = []
+        self.problems: list[str] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        in_header = self.stack[-1][1] if self.stack else False
+        in_authors = self.stack[-1][2] if self.stack else False
+        if tag == "header":
+            in_header = (
+                attributes.get("data-institution-branding") == "none"
+                or attributes.get("data-header") in {"v6", "v7", "pv6", "pv7"}
+            )
+        in_authors = in_authors or "authors" in classes
+        if in_header:
+            forbidden_classes = classes.intersection({
+                "author-legend", "institutes-line", "institution-rail",
+                "logo", "logo-block", "logo-grid", "venue-mark", "affiliations",
+            })
+            logo_image = tag == "img" and (
+                "qr-img" not in classes
+                or "/logos/" in (attributes.get("src") or "").replace("\\", "/")
+            )
+            if forbidden_classes or logo_image or (in_authors and tag == "sup"):
+                self.problems.append(
+                    f"L{self.getpos()[0]}: branding-free header contains institution "
+                    "markup, a logo, or author markers; keep only plain author "
+                    "names, venue text and optional QR tiles"
+                )
+        if tag not in _VOID_ELEMENTS:
+            self.stack.append((tag, in_header, in_authors))
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in _VOID_ELEMENTS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                return
+
+
+def _branding_free_header_lint(raw: str) -> list[str]:
+    parser = _BrandingFreeHeaderParser()
+    parser.feed(raw)
+    return parser.problems
+
+
 def _usage_role(section_id: str) -> str | None:
     section = section_id.strip().lower().replace("_", "-")
     if section == "motivation":
@@ -378,7 +437,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     raw = html_path.read_text(encoding="utf-8", errors="ignore")
     body = strip_for_lint(raw)
 
-    problems: list[str] = []
+    problems: list[str] = _branding_free_header_lint(raw)
     warnings: list[str] = []
 
     # 0) Figure-to-section semantics.  New paper2assets bundles carry an
